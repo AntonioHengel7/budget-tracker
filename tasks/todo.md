@@ -1,14 +1,14 @@
 # TODO
 
-## Phase A — Scaffolding (enforcement OFF)
+## Phase A — Scaffolding (enforcement OFF) — DONE 2026-08-12
 
 - [x] Install Node, scaffold repo, copy harness config
-- [ ] Project config files (package.json, vite.config.ts, tsconfig.json, .gitignore)
-- [ ] npm install and verify toolchain
-- [ ] Seed money.ts domain module + test
-- [ ] CI workflow
-- [ ] Phase A done checklist (see plan)
-- [ ] Create GitHub repo, push, create labels
+- [x] Project config files (package.json, vite.config.ts, tsconfig.json, .gitignore)
+- [x] npm install and verify toolchain
+- [x] Seed money.ts domain module + test (100% real coverage, no padding)
+- [x] CI workflow — green on first push (github.com/AntonioHengel7/budget-tracker)
+- [x] Phase A done checklist (see plan) — all 7 items verified, including negative cases
+- [x] Create GitHub repo, push, create labels (11/11)
 
 ## Phase B — Shakedown (enforcement ON)
 
