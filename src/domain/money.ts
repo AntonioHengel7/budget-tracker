@@ -8,7 +8,13 @@ import { ValidationError } from './errors.js';
 
 const MAX_DECIMAL_PLACES = 2;
 
-function assertSafeNonNegativeInteger(value: number, label: string): void {
+/**
+ * Guards a value as a finite, non-negative, safe-integer number of minor
+ * units. Exported so other domain modules (e.g. transaction.ts, budget.ts)
+ * validate amounts against the exact same bar as money.ts's own arithmetic,
+ * instead of re-implementing a laxer check.
+ */
+export function assertSafeNonNegativeInteger(value: number, label: string): void {
   if (!Number.isFinite(value)) {
     throw new ValidationError(`${label} must be a finite number, got ${value}`);
   }
