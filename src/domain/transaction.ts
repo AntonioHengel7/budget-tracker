@@ -1,0 +1,67 @@
+import { parseIsoDate } from './date.js';
+import type { IsoDate } from './date.js';
+import { ValidationError } from './errors.js';
+
+/**
+ * Sign lives in `kind`, never in `amountMinor` — `amountMinor` is always a
+ * strictly positive integer number of minor units (e.g. cents).
+ */
+export type TransactionKind = 'income' | 'expense';
+
+const TRANSACTION_KINDS: readonly TransactionKind[] = ['income', 'expense'];
+const MAX_NOTE_LENGTH = 200;
+
+export interface Transaction {
+  readonly date: IsoDate;
+  readonly category: string;
+  readonly kind: TransactionKind;
+  readonly amountMinor: number;
+  readonly note?: string;
+}
+
+export interface TransactionInput {
+  readonly date: string;
+  readonly category: string;
+  readonly kind: string;
+  readonly amountMinor: number;
+  readonly note?: string;
+}
+
+function isTransactionKind(value: string): value is TransactionKind {
+  return (TRANSACTION_KINDS as readonly string[]).includes(value);
+}
+
+/** Validates and constructs a Transaction, enforcing all entity invariants. */
+export function createTransaction(input: TransactionInput): Transaction {
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+    throw new ValidationError(
+      `amountMinor must be a positive integer number of minor units, got ${input.amountMinor}`,
+    );
+  }
+
+  const category = input.category.trim();
+  if (category === '') {
+    throw new ValidationError('category must not be empty');
+  }
+
+  if (!isTransactionKind(input.kind)) {
+    throw new ValidationError(`kind must be "income" or "expense", got "${input.kind}"`);
+  }
+  const kind = input.kind;
+
+  const date = parseIsoDate(input.date);
+
+  let note: string | undefined;
+  if (input.note !== undefined) {
+    const trimmed = input.note.trim();
+    if (trimmed.length > MAX_NOTE_LENGTH) {
+      throw new ValidationError(
+        `note must be at most ${MAX_NOTE_LENGTH} characters, got ${trimmed.length}`,
+      );
+    }
+    note = trimmed;
+  }
+
+  const base = { date, category, kind, amountMinor: input.amountMinor };
+  return note === undefined ? base : { ...base, note };
+}
