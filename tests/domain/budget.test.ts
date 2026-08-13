@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { CategoryBudget } from '../../src/domain/budget.js';
-import { budgetStatus, carryover, resolveLimit, spentInPeriod } from '../../src/domain/budget.js';
+import {
+  budgetStatus,
+  carryover,
+  createCategoryBudget,
+  createCategoryLimit,
+  resolveLimit,
+  spentInPeriod,
+} from '../../src/domain/budget.js';
+import { ValidationError } from '../../src/domain/errors.js';
 import { createTransaction } from '../../src/domain/transaction.js';
 import type { Transaction } from '../../src/domain/transaction.js';
 
@@ -11,6 +19,76 @@ function expenseTx(date: string, category: string, amountMinor: number): Transac
 function incomeTx(date: string, category: string, amountMinor: number): Transaction {
   return createTransaction({ date, category, kind: 'income', amountMinor });
 }
+
+describe('createCategoryLimit', () => {
+  it('creates a valid limit', () => {
+    expect(createCategoryLimit({ effectiveFrom: '2026-01', amountMinor: 1000 })).toEqual({
+      effectiveFrom: '2026-01',
+      amountMinor: 1000,
+    });
+  });
+
+  // Regression (Hobbes, PR #4 BLOCKING 3a): a NaN limit amount used to sail
+  // through untouched -- every comparison against NaN is false, so
+  // budgetStatus would silently fall through to state: 'under' no matter
+  // how much was spent. It must now be rejected at construction time.
+  it('rejects a NaN amountMinor', () => {
+    expect(() => createCategoryLimit({ effectiveFrom: '2026-01', amountMinor: NaN })).toThrow(
+      ValidationError,
+    );
+  });
+
+  it('rejects a negative amountMinor', () => {
+    expect(() => createCategoryLimit({ effectiveFrom: '2026-01', amountMinor: -1 })).toThrow(
+      ValidationError,
+    );
+  });
+
+  it('rejects an amountMinor beyond the safe integer range', () => {
+    expect(() => createCategoryLimit({ effectiveFrom: '2026-01', amountMinor: 1e300 })).toThrow(
+      ValidationError,
+    );
+  });
+
+  it('rejects a malformed effectiveFrom period', () => {
+    expect(() => createCategoryLimit({ effectiveFrom: '2026-13', amountMinor: 1000 })).toThrow(
+      ValidationError,
+    );
+  });
+});
+
+describe('createCategoryBudget', () => {
+  it('creates a valid budget, validating each of its limits', () => {
+    const budget = createCategoryBudget({
+      category: 'groceries',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 1000 }],
+    });
+    expect(budget).toEqual({
+      category: 'groceries',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 1000 }],
+    });
+  });
+
+  it('rejects an empty category', () => {
+    expect(() => createCategoryBudget({ category: '', rollover: true, limits: [] })).toThrow(
+      ValidationError,
+    );
+  });
+
+  // Regression (Hobbes, PR #4 BLOCKING 3a): a NaN limit nested inside a
+  // budget's limit history must be rejected the same way a top-level one is.
+  it('rejects a NaN amountMinor on any of its limits', () => {
+    expect(() =>
+      createCategoryBudget({
+        category: 'groceries',
+        rollover: true,
+        limits: [{ effectiveFrom: '2026-01', amountMinor: NaN }],
+      }),
+    ).toThrow(ValidationError);
+  });
+});
 
 describe('resolveLimit', () => {
   const budget: CategoryBudget = {
@@ -101,6 +179,23 @@ describe('carryover', () => {
     // carry(2026-02) = 1000 + 0 - 0 = 1000
     // carry(2026-03) = 1000 + 1000 - 0 = 2000
     expect(carryover(budget, [], '2026-03')).toBe(2000);
+  });
+
+  // Regression (Hobbes, PR #4 BLOCKING 3b): the old recurrence accumulated
+  // via raw `+`/`-` with no safe-integer check across iterations, so large-
+  // but-individually-safe amounts could silently exceed
+  // Number.MAX_SAFE_INTEGER after a few periods and produce an imprecise
+  // number instead of failing. The rewritten recurrence routes every
+  // accumulation through sumMinor/subMinor, which guard this.
+  it('throws instead of silently exceeding the safe integer range while accumulating', () => {
+    const budget: CategoryBudget = {
+      category: 'x',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 5_000_000_000_000_000 }],
+    };
+    // Two periods with no spending push the accumulated total
+    // (5e15 + 5e15 = 1e16) past Number.MAX_SAFE_INTEGER.
+    expect(() => carryover(budget, [], '2026-03')).toThrow(ValidationError);
   });
 
   it('is correct when the limit changes mid-stream', () => {

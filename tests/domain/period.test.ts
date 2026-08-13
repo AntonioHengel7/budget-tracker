@@ -32,6 +32,17 @@ describe('nextPeriod', () => {
   it('increments within the same year', () => {
     expect(nextPeriod('2026-01')).toBe('2026-02');
   });
+
+  // Regression (Hobbes, PR #4 BLOCKING 1): nextPeriod("9999-12") used to
+  // return "10000-01", a 5-digit year that breaks the zero-padded-string-
+  // compare invariant and sent periodsBetween into an unbounded loop.
+  it('rejects rolling past year 9999 instead of producing a 5-digit year', () => {
+    expect(() => nextPeriod('9999-12')).toThrow(ValidationError);
+  });
+
+  it('rolls within year 9999 normally', () => {
+    expect(nextPeriod('9999-11')).toBe('9999-12');
+  });
 });
 
 describe('comparePeriod', () => {
@@ -63,5 +74,21 @@ describe('periodsBetween', () => {
       '2027-01',
       '2027-02',
     ]);
+  });
+
+  // Regression (Hobbes, PR #4 BLOCKING 1): periodsBetween(..., "9999-12")
+  // used to never terminate -- it kept calling nextPeriod past the year-9999
+  // boundary, misordering via the broken 5-digit-year string and looping
+  // forever while pushing into `result` (OOM). It must now terminate
+  // immediately once it reaches "to", without ever calling nextPeriod again.
+  it('terminates at the year-9999 boundary instead of looping forever', () => {
+    expect(periodsBetween('9999-10', '9999-12')).toEqual(['9999-10', '9999-11', '9999-12']);
+  });
+
+  // Regression (Hobbes, PR #4 BLOCKING 1): defensive cap, independent of
+  // nextPeriod's own bound -- an absurdly large requested range must fail
+  // fast with a ValidationError rather than accumulate unbounded memory.
+  it('throws instead of accumulating an unbounded number of periods', () => {
+    expect(() => periodsBetween('0001-01', '9999-12')).toThrow(ValidationError);
   });
 });

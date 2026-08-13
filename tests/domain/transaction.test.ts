@@ -29,6 +29,15 @@ describe('createTransaction', () => {
     expect(() => createTransaction({ ...validInput, amountMinor: 12.5 })).toThrow(ValidationError);
   });
 
+  // Regression (Hobbes, PR #4 BLOCKING 2): Number.isInteger(1e300) is true,
+  // so the old `!Number.isInteger(x) || x <= 0` check let unsafe-integer
+  // amounts through. amountMinor must now be routed through money.ts's
+  // assertSafeNonNegativeInteger, matching the exact bar money.ts itself
+  // enforces for every other amount in the domain layer.
+  it('rejects an amountMinor beyond the safe integer range (e.g. 1e300)', () => {
+    expect(() => createTransaction({ ...validInput, amountMinor: 1e300 })).toThrow(ValidationError);
+  });
+
   it('rejects an empty category', () => {
     expect(() => createTransaction({ ...validInput, category: '' })).toThrow(ValidationError);
     expect(() => createTransaction({ ...validInput, category: '   ' })).toThrow(ValidationError);

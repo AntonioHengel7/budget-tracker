@@ -32,6 +32,14 @@ export function nextPeriod(period: Period): Period {
   const nextMonth = month === 12 ? 1 : month + 1;
   const nextYear = month === 12 ? year + 1 : year;
 
+  // A 5-digit year would break the zero-padded-string-compare invariant
+  // every other function in this module (and budget.ts's carryover) relies
+  // on, and would let periodsBetween's loop run past its bound. Reject the
+  // rollover outright instead of silently producing "10000-01".
+  if (nextYear > 9999) {
+    throw new ValidationError(`period cannot advance past year 9999, got "${period}"`);
+  }
+
   return `${String(nextYear).padStart(4, '0')}-${String(nextMonth).padStart(2, '0')}`;
 }
 
@@ -42,6 +50,12 @@ export function comparePeriod(a: Period, b: Period): number {
   return 0;
 }
 
+// Defense in depth, independent of nextPeriod's own year-9999 bound: refuse
+// to accumulate an unbounded number of periods into memory even if a caller
+// requests an absurdly large range. 2400 periods is 200 years of months --
+// generously beyond any realistic budget history.
+const MAX_PERIODS_BETWEEN = 2400;
+
 /** All periods from `from` to `to`, inclusive of both ends. Empty if `to` precedes `from`. */
 export function periodsBetween(from: Period, to: Period): Period[] {
   if (comparePeriod(to, from) < 0) {
@@ -50,8 +64,19 @@ export function periodsBetween(from: Period, to: Period): Period[] {
 
   const result: Period[] = [];
   let cursor = from;
-  while (comparePeriod(cursor, to) <= 0) {
+  while (true) {
     result.push(cursor);
+    if (result.length > MAX_PERIODS_BETWEEN) {
+      throw new ValidationError(
+        `periodsBetween("${from}", "${to}") would exceed ${MAX_PERIODS_BETWEEN} periods -- refusing to continue`,
+      );
+    }
+    // Stop before advancing past `to` -- crucial at the year-9999 boundary,
+    // where nextPeriod(cursor) would throw even though `to` has already
+    // been reached and no further advance is needed.
+    if (comparePeriod(cursor, to) >= 0) {
+      break;
+    }
     cursor = nextPeriod(cursor);
   }
   return result;

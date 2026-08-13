@@ -1,6 +1,7 @@
 import { parseIsoDate } from './date.js';
 import type { IsoDate } from './date.js';
 import { ValidationError } from './errors.js';
+import { assertSafeNonNegativeInteger } from './money.js';
 
 /**
  * Sign lives in `kind`, never in `amountMinor` — `amountMinor` is always a
@@ -33,7 +34,8 @@ function isTransactionKind(value: string): value is TransactionKind {
 
 /** Validates and constructs a Transaction, enforcing all entity invariants. */
 export function createTransaction(input: TransactionInput): Transaction {
-  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+  assertSafeNonNegativeInteger(input.amountMinor, 'amountMinor');
+  if (input.amountMinor <= 0) {
     throw new ValidationError(
       `amountMinor must be a positive integer number of minor units, got ${input.amountMinor}`,
     );
