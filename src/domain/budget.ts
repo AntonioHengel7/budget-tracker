@@ -156,16 +156,24 @@ export function carryover(
   let carry = 0;
   let cursor = start;
   while (comparePeriod(cursor, period) < 0) {
-    // cursor is always >= start (the earliest effectiveFrom across
-    // budget.limits), so a limit is guaranteed to resolve here. The one way
-    // this could previously break -- nextPeriod silently rolling a period
-    // past year 9999 into a malformed 5-digit-year string, which sorts
-    // before every real period and defeats this comparison -- is now
-    // rejected at the source in period.ts's nextPeriod, so the guarantee
-    // genuinely holds rather than merely being assumed.
-    const limitMinor = (resolveLimit(budget, cursor) as CategoryLimit).amountMinor;
+    // resolveLimit is expected to succeed for cursor >= start, but Period is
+    // just `type Period = string` -- nothing forces effectiveFrom or period
+    // values to have gone through parsePeriod before reaching this function,
+    // and CategoryBudget/CategoryLimit can be (and, in this repo's own test
+    // suite, are) constructed as plain object literals that bypass
+    // createCategoryBudget entirely. An unpadded value like "2026-1" sorts
+    // differently than "2026-01" under plain string comparison, which can
+    // break the "cursor is always covered" assumption. This is a public API
+    // boundary, so fail with a clear ValidationError instead of trusting an
+    // invariant a caller can violate.
+    const limit = resolveLimit(budget, cursor);
+    if (limit === undefined) {
+      throw new ValidationError(
+        `no limit resolved for period "${cursor}" in category "${budget.category}" -- effectiveFrom values must be zero-padded "YYYY-MM" strings (see parsePeriod)`,
+      );
+    }
     const spent = spentInPeriod(transactions, budget.category, cursor);
-    carry = subtractSpentFromAvailable(addCarryToLimit(limitMinor, carry), spent);
+    carry = subtractSpentFromAvailable(addCarryToLimit(limit.amountMinor, carry), spent);
     cursor = nextPeriod(cursor);
   }
 
@@ -181,7 +189,7 @@ export function budgetStatus(
   const limit = resolveLimit(budget, period);
   const limitMinor = limit?.amountMinor ?? 0;
   const carryInMinor = carryover(budget, transactions, period);
-  const availableMinor = limitMinor + carryInMinor;
+  const availableMinor = addCarryToLimit(limitMinor, carryInMinor);
   const spentMinor = spentInPeriod(transactions, budget.category, period);
 
   const state: BudgetState =

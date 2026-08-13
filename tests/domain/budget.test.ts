@@ -245,6 +245,25 @@ describe('carryover', () => {
     // carry(2026-03) = limit(2026-02)=2000 + 1000 - 0 = 3000
     expect(carryover(budget, [], '2026-03')).toBe(3000);
   });
+
+  // Regression (Socrates, PR #4 round 3 BLOCKING 1): CategoryBudget can be
+  // (and, throughout this very file, is) constructed as a plain object
+  // literal that bypasses createCategoryBudget/parsePeriod entirely. An
+  // unpadded effectiveFrom like "2026-1" sorts differently than a proper
+  // "2026-01" under the plain string comparison every function in this
+  // module relies on: nextPeriod("2026-1") produces "2026-02" (string
+  // concatenation has no idea "2026-1" should have meant "2026-01"), and
+  // comparePeriod("2026-1", "2026-02") > 0 -- so resolveLimit fails to find
+  // a limit it logically should have, at a cursor mid-loop. This must throw
+  // a ValidationError, not dereference `undefined` via an unsafe cast.
+  it('throws a ValidationError (not a raw TypeError) when an unpadded effectiveFrom desyncs string ordering mid-loop', () => {
+    const budget: CategoryBudget = {
+      category: 'x',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-1', amountMinor: 100 }],
+    };
+    expect(() => carryover(budget, [], '2027-01')).toThrow(ValidationError);
+  });
 });
 
 describe('budgetStatus', () => {
@@ -278,5 +297,24 @@ describe('budgetStatus', () => {
     const status = budgetStatus(budget, [], '2025-12');
     expect(status.availableMinor).toBe(0);
     expect(status.pctUsed).toBeNull();
+  });
+
+  // Regression (Socrates, PR #4 round 3 BLOCKING 2): availableMinor used to
+  // be a raw `limitMinor + carryInMinor`, the same unguarded-addition defect
+  // class already fixed in carryover itself via addCarryToLimit. Reachable
+  // through the fully validated public API, no object-literal bypass needed:
+  // a large-but-individually-safe limit, once carried forward a period,
+  // combines with the next period's limit to exceed
+  // Number.MAX_SAFE_INTEGER.
+  it('throws instead of silently exceeding the safe integer range when combining limit and carry', () => {
+    const bigLimitBudget = createCategoryBudget({
+      category: 'x',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 5_000_000_000_000_000 }],
+    });
+    // carryInMinor into 2026-02 is 5e15 (the full limit rolls forward, no
+    // spending yet); limitMinor for 2026-02 is also 5e15 -- their sum
+    // (1e16) exceeds Number.MAX_SAFE_INTEGER.
+    expect(() => budgetStatus(bigLimitBudget, [], '2026-02')).toThrow(ValidationError);
   });
 });
