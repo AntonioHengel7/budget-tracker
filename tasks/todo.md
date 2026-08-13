@@ -13,16 +13,17 @@
 ## Phase B — Shakedown (enforcement ON)
 
 - [x] B0: flip enforce:true, branch protection, dress-rehearsal PR (issue #1) — DONE 2026-08-12, merged as PR #2
-- [ ] B1: real domain issue — transaction/budget/period model (issue #3 — #2 was consumed by the B0 PR, GitHub shares one number sequence for issues and PRs)
-- [ ] File follow-up issues (see review section below for the full accumulated list from B0)
-
-## Paused 2026-08-13 (mid B1 review round 2 — resume here)
-
-PR #4 (`issue/3-domain-layer` @ `66e35e2`) not merged. Round 2 verdicts:
-- PLATO: FAIL — 1 blocking: the round-1 fix's `// coverage-skip: ...` comment on the "unreachable" branch in `budget.ts` doesn't match this repo's actual enforced skip vocabulary (`v8 ignore` / `istanbul ignore` / `c8 ignore` / `pragma: no cover`, each needing an adjacent `justification:` comment — see `coverage-gate.sh`'s scan logic). It's cosmetic, doesn't really exclude the branch from coverage. Also NOTE (non-blocking): the carryover rewrite (array + telescoping sum) is more machinery than the fix needed — a plain per-iteration `addMinor`/`subMinor` swap would avoid the unreachable-branch problem entirely.
-- HOBBES / SOCRATES: stopped mid-recheck (user cost concern), no usable verdict — Hobbes had confirmed the carryover math is mathematically correct before being stopped.
-
-Next step: fix the coverage-skip comment (real `v8 ignore` + `justification:`, or just remove the array/telescoping approach per Plato's simplification note and go back to a plain loop with addMinor/subMinor — probably the better fix, avoids the unreachable branch entirely), then re-dispatch fresh Socrates/Plato/Hobbes review at the new SHA.
+- [x] B1: real domain issue — transaction/budget/period model (issue #3) — DONE 2026-08-13, merged as PR #4 after 4 review rounds
+- [ ] File follow-up issues (see review section below for the full accumulated list)
 
 ## Review
-(filled at completion)
+
+**B1 (2026-08-13):** Domain layer (date/period/transaction/budget/summary/filter) built by the `builder` subagent, went through 4 real Socrates/Plato/Hobbes review rounds before merging clean:
+- Round 1: Socrates PASS, Plato PASS, **Hobbes FAIL — 3 blocking** (`periodsBetween` infinite loop/OOM at year 9999 rollover; `createTransaction` accepted `amountMinor: 1e300`, weaker than `money.ts`'s guard; `budget.ts` had no validating constructor, NaN limit silently reported `state:'under'`, carryover math bypassed overflow protection).
+- Round 2 (after fix): **Plato FAIL — 1 blocking** (a `// coverage-skip:` comment invented for an "unreachable" branch didn't match this repo's real enforced skip vocabulary).
+- Round 3 (after simplifying carryover per Plato's note): **Socrates FAIL — 2 blocking**, both with concrete reproducers (the "unreachable" cast was actually reachable via a non-zero-padded period literal bypassing `parsePeriod`; a raw `+` at `budgetStatus` could silently exceed `MAX_SAFE_INTEGER`).
+- Round 4: **all three PASS**, verified independently (Socrates did mutation testing — reverted the source and confirmed the new regression tests fail on old code, pass on new; Hobbes ran a 3000-case fuzz against a BigInt oracle on the sign-handling arithmetic).
+
+Every blocking finding was real, execution-confirmed, and caught something a "looks right" read wouldn't have. This is the harness's review gate working as designed, not theater.
+
+Also mid-flight: discovered a shared-git-checkout hazard — running multiple Bash-capable review agents against the same working directory (no worktree isolation) let one agent's `git checkout`/cleanup step switch the branch under the others, and later caused a real false-FAIL when one agent's file mutations raced another's test run. Worked around each time (isolated `git archive` exports, explicit `-R owner/repo` on cross-repo `gh` calls); should use `isolation: "worktree"` for this pattern going forward.
