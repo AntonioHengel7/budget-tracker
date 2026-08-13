@@ -1,6 +1,6 @@
 import { periodOf } from './date.js';
 import { ValidationError } from './errors.js';
-import { assertSafeNonNegativeInteger, subMinor, sumMinor } from './money.js';
+import { addMinor, assertSafeNonNegativeInteger, subMinor, sumMinor } from './money.js';
 import type { Period } from './period.js';
 import { comparePeriod, nextPeriod, parsePeriod } from './period.js';
 import type { Transaction } from './transaction.js';
@@ -105,6 +105,27 @@ function firstLimitedPeriod(budget: CategoryBudget): Period | undefined {
 }
 
 /**
+ * limitMinor + carry, where `carry` may legitimately be negative (a prior
+ * overspend rolled forward). addMinor/subMinor both require non-negative
+ * operands, so the sign of `carry` picks which one actually applies here:
+ * limitMinor + carry === limitMinor - (-carry) when carry < 0. Either way,
+ * every step is safe-integer-guarded -- never a raw `+`.
+ */
+function addCarryToLimit(limitMinor: number, carry: number): number {
+  return carry >= 0 ? addMinor(limitMinor, carry) : subMinor(limitMinor, -carry);
+}
+
+/**
+ * available - spentMinor, where `available` (limit + carry, above) may
+ * itself be negative when a prior overspend exceeds the current limit.
+ * subMinor requires a non-negative first operand, so mirror the same sign
+ * trick: available - spent === -((-available) + spent) when available < 0.
+ */
+function subtractSpentFromAvailable(available: number, spentMinor: number): number {
+  return available >= 0 ? subMinor(available, spentMinor) : -addMinor(-available, spentMinor);
+}
+
+/**
  * The balance carried INTO `period`, per the recurrence:
  *   carry(p+1) = rollover ? (limit(p) + carry(p) - spent(p)) : 0
  * with carry = 0 in the first period that has a limit (and in any period at
@@ -112,14 +133,11 @@ function firstLimitedPeriod(budget: CategoryBudget): Period | undefined {
  *
  * `rollover` is a fixed property of the budget (not per-period), so when it
  * is false the result is always 0 -- no need to walk any periods at all.
- * When it is true, the recurrence telescopes: since every term is added
- * exactly once with a fixed +1 coefficient, carry(period) is equivalent to
- * (sum of limit(p) for p in [start, period)) - (sum of spent(p) for the same
- * range). That lets both accumulations run through sumMinor (which safe-
- * integer-guards every intermediate step via addMinor) instead of repeated
- * raw `+`/`-`, which had no such guard across iterations, and the final
- * combination -- which may legitimately go negative on overspend -- through
- * subMinor.
+ * When it is true, this walks the periods one at a time exactly as the
+ * recurrence specifies, but routes every addition/subtraction through
+ * addCarryToLimit/subtractSpentFromAvailable (which are themselves built on
+ * money.ts's addMinor/subMinor) instead of raw `+`/`-`, so an unsafe-integer
+ * accumulation fails loudly instead of silently losing precision.
  */
 export function carryover(
   budget: CategoryBudget,
@@ -135,30 +153,23 @@ export function carryover(
     return 0;
   }
 
-  const limitsAccrued: number[] = [];
-  const spendsAccrued: number[] = [];
+  let carry = 0;
   let cursor = start;
   while (comparePeriod(cursor, period) < 0) {
-    const limit = resolveLimit(budget, cursor);
-    if (limit === undefined) {
-      // coverage-skip: unreachable under the current algorithm -- cursor is
-      // always >= start (the earliest effectiveFrom across budget.limits),
-      // so resolveLimit is guaranteed to find at least that limit. Kept as
-      // an explicit guard (Socrates, PR #4) so a future regression here
-      // fails with a clear ValidationError instead of a raw TypeError from
-      // an unsafe cast.
-      throw new ValidationError(
-        `no limit resolved for period "${cursor}" in category "${budget.category}" though it is within the budget's limited range`,
-      );
-    }
-    limitsAccrued.push(limit.amountMinor);
-    spendsAccrued.push(spentInPeriod(transactions, budget.category, cursor));
+    // cursor is always >= start (the earliest effectiveFrom across
+    // budget.limits), so a limit is guaranteed to resolve here. The one way
+    // this could previously break -- nextPeriod silently rolling a period
+    // past year 9999 into a malformed 5-digit-year string, which sorts
+    // before every real period and defeats this comparison -- is now
+    // rejected at the source in period.ts's nextPeriod, so the guarantee
+    // genuinely holds rather than merely being assumed.
+    const limitMinor = (resolveLimit(budget, cursor) as CategoryLimit).amountMinor;
+    const spent = spentInPeriod(transactions, budget.category, cursor);
+    carry = subtractSpentFromAvailable(addCarryToLimit(limitMinor, carry), spent);
     cursor = nextPeriod(cursor);
   }
 
-  const totalLimit = sumMinor(limitsAccrued);
-  const totalSpent = sumMinor(spendsAccrued);
-  return subMinor(totalLimit, totalSpent);
+  return carry;
 }
 
 /** Full budget status for `category` in `period`: limit, carry-in, spend, and state. */

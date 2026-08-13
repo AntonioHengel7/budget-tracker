@@ -185,8 +185,9 @@ describe('carryover', () => {
   // via raw `+`/`-` with no safe-integer check across iterations, so large-
   // but-individually-safe amounts could silently exceed
   // Number.MAX_SAFE_INTEGER after a few periods and produce an imprecise
-  // number instead of failing. The rewritten recurrence routes every
-  // accumulation through sumMinor/subMinor, which guard this.
+  // number instead of failing. Each per-period step now routes through
+  // addMinor/subMinor (via addCarryToLimit/subtractSpentFromAvailable),
+  // which guard this.
   it('throws instead of silently exceeding the safe integer range while accumulating', () => {
     const budget: CategoryBudget = {
       category: 'x',
@@ -196,6 +197,39 @@ describe('carryover', () => {
     // Two periods with no spending push the accumulated total
     // (5e15 + 5e15 = 1e16) past Number.MAX_SAFE_INTEGER.
     expect(() => carryover(budget, [], '2026-03')).toThrow(ValidationError);
+  });
+
+  // A prior overspend (negative carry) must combine correctly with a later
+  // period's limit -- addMinor/subMinor only accept non-negative operands,
+  // so this exercises the sign-flip path in addCarryToLimit.
+  it('correctly combines a carried-forward negative balance with a later limit', () => {
+    const budget: CategoryBudget = {
+      category: 'x',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 1000 }],
+    };
+    const transactions = [
+      expenseTx('2026-01-10', 'x', 1500), // overspend by 500 in month 1
+      expenseTx('2026-02-10', 'x', 200),
+    ];
+    // carry(2026-02) = 1000 + 0 - 1500 = -500
+    // carry(2026-03) = 1000 + (-500) - 200 = 300
+    expect(carryover(budget, transactions, '2026-03')).toBe(300);
+  });
+
+  // A deep-enough overspend can leave the combined "available" balance
+  // itself negative even after adding a later period's limit -- exercises
+  // the sign-flip path in subtractSpentFromAvailable.
+  it('handles an available balance that stays negative after a later limit is added', () => {
+    const budget: CategoryBudget = {
+      category: 'x',
+      rollover: true,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 100 }],
+    };
+    const transactions = [expenseTx('2026-01-10', 'x', 10000)];
+    // carry(2026-02) = 100 + 0 - 10000 = -9900
+    // carry(2026-03) = 100 + (-9900) - 0 = -9800
+    expect(carryover(budget, transactions, '2026-03')).toBe(-9800);
   });
 
   it('is correct when the limit changes mid-stream', () => {
