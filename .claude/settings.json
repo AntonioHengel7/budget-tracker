@@ -1,0 +1,62 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash .claude/statusline-command.sh"
+  },
+  "showThinkingSummaries": true,
+  "env": {
+    "CLAUDE_CODE_NO_FLICKER": "1"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/context-inject.sh" }]
+      },
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/user-prompt-planning.sh" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/reflect-stop.sh" }]
+      },
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/snapshot-on-compact.sh" }]
+      },
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/subagent-stop-redispatch.sh" }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": ".claude/hooks/write-dir-check.sh" },
+          { "type": "command", "command": ".claude/hooks/pre-edit-freeze.sh" }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [{ "type": "command", "command": ".claude/hooks/pre-edit-freeze.sh" }]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": ".claude/hooks/git-preflight.sh" },
+          { "type": "command", "command": ".claude/hooks/commit-msg-issue-ref.sh" },
+          { "type": "command", "command": ".claude/hooks/pre-merge-gate.sh" }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/pre-compact-save.sh" }]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [{ "type": "command", "command": ".claude/hooks/post-compact-context.sh" }]
+      }
+    ]
+  }
+}

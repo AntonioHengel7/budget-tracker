@@ -1,0 +1,18 @@
+{
+  "_doc": {
+    "purpose": "Per-project coverage gate configuration for .claude/hooks/lib/coverage-gate.sh and /ship.",
+    "core": "Array of glob patterns that identify 'core' source files (domain logic, business rules). Coverage for matched files is checked against thresholds.core. Globs follow the same syntax as .gitignore / minimatch.",
+    "thresholds.core": "Minimum line-coverage percentage (0-100) required across all files matching 'core' globs. Default: 95. Merge is blocked if core coverage falls below this bar.",
+    "thresholds.patch": "Minimum line-coverage percentage (0-100) required on lines changed in this PR (patch coverage). Default: 100. Edges/error-paths that cannot be covered must be quarantined with a named justification comment (e.g. // coverage-skip: unreachable — OS-level error). Planned — enforced at the pre-merge gate (Step 2) via diff-cover; not yet active.",
+    "mode": "'auto' | 'bar' | 'ratchet'. auto = use 'bar' for new repos (no prior coverage baseline on main); use 'ratchet' for repos already below the core threshold (never regress, don't demand a sudden jump). bar = hard threshold, always. ratchet = current coverage must be >= the baseline stored in .jome/coverage-baseline.json; the threshold is the baseline, not the configured number.",
+    "enforce": "true activates the Step 2 enforcement hooks (commit-msg issue-ref, push-to-main block, pre-merge gate) for this repo; false/absent = dormant.",
+    "known_gap": "coverage-gate.sh's live-run path (read_core_pct_from_config) does NOT filter by these `core` globs — it reads vitest's whole-report .total.lines.pct. To make the 95% bar mean 'core coverage', vite.config.ts's own coverage.include is scoped to the same globs as `core` below, so the whole-report total IS the core total. tests/config/coverage-scope.test.ts guards the two from drifting apart. Filed as a discovered issue against Jome (coverage-gate.sh itself)."
+  },
+  "core": ["src/domain/**/*.ts"],
+  "thresholds": {
+    "core": 95,
+    "patch": 100
+  },
+  "mode": "bar",
+  "enforce": false
+}
