@@ -12,9 +12,9 @@
 
 ## Phase B — Shakedown (enforcement ON)
 
-- [ ] B0: flip enforce:true, branch protection, dress-rehearsal PR (issue #1)
-- [ ] B1: real domain issue — transaction/budget/period model (issue #2)
-- [ ] File follow-up issues: JSON store, CLI commands (this repo); detect_language pipefail bug, unused core globs, branch-protection self-approval deadlock (against Jome, source:discovered)
+- [x] B0: flip enforce:true, branch protection, dress-rehearsal PR (issue #1) — DONE 2026-08-12, merged as PR #2
+- [ ] B1: real domain issue — transaction/budget/period model (issue #3 — #2 was consumed by the B0 PR, GitHub shares one number sequence for issues and PRs)
+- [ ] File follow-up issues (see review section below for the full accumulated list from B0)
 
 ## Review
 (filled at completion)
