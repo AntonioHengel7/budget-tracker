@@ -14,5 +14,5 @@
     "patch": 100
   },
   "mode": "bar",
-  "enforce": false
+  "enforce": true
 }
