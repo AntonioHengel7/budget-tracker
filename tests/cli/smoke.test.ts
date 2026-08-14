@@ -95,6 +95,12 @@ describe('CLI smoke test (real process invocation)', () => {
     expect(stored.transactions[0].transaction.date).toBe(today);
   });
 
+  // Regression (Socrates, PR #7 round 2 BLOCKING 1): the "limit set"
+  // confirmation message used to print budget.limits[length - 1], assuming
+  // a set always appends. Once setLimit started replacing an existing
+  // limit in place (round-1 fix), correcting an earlier period printed the
+  // later period's amount instead -- data on disk was right, the message
+  // lied. Fixed by looking up the limit matching options.effectiveFrom.
   it('limit set prints the amount for the corrected period, not the array tail, when correcting an earlier period', () => {
     const first = runCli(['--file', filePath, 'limit', 'set', 'food', '500', '--effective-from', '2026-08']);
     expect(first.status).toBe(0);
