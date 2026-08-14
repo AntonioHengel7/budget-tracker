@@ -1,0 +1,51 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { addTransaction } from '../../src/cli/commands/add.js';
+import { setLimit } from '../../src/cli/commands/limit.js';
+import { getStatus } from '../../src/cli/commands/status.js';
+import { ValidationError } from '../../src/domain/errors.js';
+
+let dir: string;
+let filePath: string;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'cli-status-test-'));
+  filePath = join(dir, 'budget.json');
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+describe('getStatus', () => {
+  it('reports status for every configured budget in the given period', async () => {
+    await setLimit(filePath, { category: 'groceries', amount: '100', effectiveFrom: '2026-08' });
+    await addTransaction(filePath, { amount: '42.50', category: 'groceries', kind: 'expense', date: '2026-08-05' });
+
+    const results = await getStatus(filePath, { period: '2026-08' });
+
+    expect(results).toEqual([
+      {
+        period: '2026-08',
+        category: 'groceries',
+        limitMinor: 10000,
+        carryInMinor: 0,
+        availableMinor: 10000,
+        spentMinor: 4250,
+        state: 'under',
+        pctUsed: 42.5,
+      },
+    ]);
+  });
+
+  it('returns an empty list when no budgets are configured', async () => {
+    const results = await getStatus(filePath, { period: '2026-08' });
+    expect(results).toEqual([]);
+  });
+
+  it('rejects an invalid period', async () => {
+    await expect(getStatus(filePath, { period: 'not-a-period' })).rejects.toThrow(ValidationError);
+  });
+});
