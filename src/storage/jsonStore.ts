@@ -24,6 +24,33 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The domain constructors (createTransaction/createCategoryBudget) are
+ * TypeScript-typed for string/number/boolean, but that's a compile-time-only
+ * guarantee -- it does not check anything at runtime. A hand-edited JSON file
+ * can put a string where a boolean is expected (JS truthiness would then
+ * silently misinterpret it), an array where a string is expected (regex
+ * .exec() coerces it into a "ghost" value instead of rejecting it), or omit
+ * an array entirely (crashing .map() with a raw TypeError instead of the
+ * promised StorageError). This checks each field's actual runtime type
+ * before it is ever handed to a domain constructor, so every escape throws a
+ * clean StorageError instead of silently corrupting data or leaking a raw
+ * TypeError past this module's boundary.
+ */
+function assertFieldType(
+  condition: boolean,
+  filePath: string,
+  field: string,
+  expected: string,
+): void {
+  if (!condition) {
+    const article = /^[aeiou]/i.test(expected) ? 'an' : 'a';
+    throw new StorageError(
+      `store file "${filePath}" has field "${field}" that is not ${article} ${expected}`,
+    );
+  }
+}
+
 function validateStoredTransaction(entry: unknown, filePath: string): StoredTransaction {
   if (!isPlainObject(entry)) {
     throw new StorageError(`store file "${filePath}" contains a malformed transaction entry`);
@@ -41,6 +68,27 @@ function validateStoredTransaction(entry: unknown, filePath: string): StoredTran
     );
   }
 
+  assertFieldType(typeof transaction.date === 'string', filePath, `transactions[${id}].date`, 'string');
+  assertFieldType(
+    typeof transaction.category === 'string',
+    filePath,
+    `transactions[${id}].category`,
+    'string',
+  );
+  assertFieldType(typeof transaction.kind === 'string', filePath, `transactions[${id}].kind`, 'string');
+  assertFieldType(
+    typeof transaction.amountMinor === 'number',
+    filePath,
+    `transactions[${id}].amountMinor`,
+    'number',
+  );
+  assertFieldType(
+    transaction.note === undefined || typeof transaction.note === 'string',
+    filePath,
+    `transactions[${id}].note`,
+    'string',
+  );
+
   // Re-validated through the domain's own constructor -- never trust a
   // hand-edited or corrupted JSON file as pre-validated. Any ValidationError
   // createTransaction throws (e.g. a tampered negative amountMinor) is
@@ -55,6 +103,37 @@ function validateBudget(entry: unknown, filePath: string): CategoryBudget {
   if (!isPlainObject(entry)) {
     throw new StorageError(`store file "${filePath}" contains a malformed budget entry`);
   }
+
+  const category = typeof entry.category === 'string' ? entry.category : '<unknown category>';
+  assertFieldType(typeof entry.category === 'string', filePath, `budgets[${category}].category`, 'string');
+  assertFieldType(
+    typeof entry.rollover === 'boolean',
+    filePath,
+    `budgets[${category}].rollover`,
+    'boolean',
+  );
+  assertFieldType(Array.isArray(entry.limits), filePath, `budgets[${category}].limits`, 'array');
+
+  for (const [index, limit] of (entry.limits as unknown[]).entries()) {
+    if (!isPlainObject(limit)) {
+      throw new StorageError(
+        `store file "${filePath}" has a malformed entry at budgets[${category}].limits[${index}]`,
+      );
+    }
+    assertFieldType(
+      typeof limit.effectiveFrom === 'string',
+      filePath,
+      `budgets[${category}].limits[${index}].effectiveFrom`,
+      'string',
+    );
+    assertFieldType(
+      typeof limit.amountMinor === 'number',
+      filePath,
+      `budgets[${category}].limits[${index}].amountMinor`,
+      'number',
+    );
+  }
+
   // Re-validated through the domain's own constructor, same as transactions above.
   return createCategoryBudget(entry as unknown as Parameters<typeof createCategoryBudget>[0]);
 }
@@ -127,7 +206,11 @@ export async function saveStore(filePath: string, store: PersistedStore): Promis
 
   try {
     await mkdir(dir, { recursive: true });
-    await writeFile(tempPath, json, { encoding: 'utf-8', mode: 0o600 });
+    // flag: 'wx' -- exclusive create, fails instead of following a
+    // pre-existing symlink at tempPath. The unguessable randomUUID() temp
+    // name already makes this unlikely, but 'wx' closes it structurally
+    // rather than relying on that alone.
+    await writeFile(tempPath, json, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
     // writeFile's `mode` is subject to the process umask, which can only
     // clear bits -- in practice that already yields 0600 here since 0600 has
     // no group/other bits to clear. chmod explicitly anyway so the "saved

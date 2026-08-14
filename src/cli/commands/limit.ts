@@ -23,7 +23,20 @@ export async function setLimit(filePath: string, options: SetLimitOptions): Prom
   const existing = store.budgets.find((budget) => budget.category === options.category.trim());
   const rollover = options.rollover ?? existing?.rollover ?? false;
   const newLimit: CategoryLimitInput = { effectiveFrom: options.effectiveFrom, amountMinor };
-  const limits = existing === undefined ? [newLimit] : [...existing.limits, newLimit];
+  // If a limit already exists for this exact effectiveFrom period, replace it
+  // in place rather than appending a second entry -- resolveLimit (domain,
+  // frozen) breaks ties on equal effectiveFrom by keeping the FIRST match, so
+  // appending a duplicate would silently no-op the correction (and corrupt
+  // carryover math for every later period, since carryover walks resolveLimit
+  // repeatedly).
+  const limits =
+    existing === undefined
+      ? [newLimit]
+      : existing.limits.some((limit) => limit.effectiveFrom === options.effectiveFrom)
+        ? existing.limits.map((limit) =>
+            limit.effectiveFrom === options.effectiveFrom ? newLimit : limit,
+          )
+        : [...existing.limits, newLimit];
 
   const updated = createCategoryBudget({ category: options.category, rollover, limits });
 

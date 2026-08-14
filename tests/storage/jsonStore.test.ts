@@ -103,6 +103,68 @@ describe('jsonStore', () => {
     await expect(loadStore(filePath)).rejects.toThrow(ValidationError);
   });
 
+  // Regressions (Socrates + Hobbes, PR #7 BLOCKING 2): the domain
+  // constructors are only TypeScript-typed, which is compile-time-only and
+  // enforces nothing at runtime -- a hand-edited file could put the wrong
+  // JS type on a field and either silently corrupt data (JS truthiness on a
+  // stringy "rollover") or crash with a raw TypeError instead of the
+  // promised StorageError. loadStore must now type-check every field before
+  // handing it to a domain constructor.
+  it('rejects a non-boolean "rollover" field (e.g. the string "no") as StorageError, not silent truthy coercion', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        transactions: [],
+        budgets: [
+          {
+            category: 'groceries',
+            rollover: 'no',
+            limits: [{ effectiveFrom: '2026-08', amountMinor: 10000 }],
+          },
+        ],
+      }),
+    );
+    await expect(loadStore(filePath)).rejects.toThrow(StorageError);
+  });
+
+  it('rejects a non-string "date" field (e.g. an array) as StorageError, not a raw TypeError or a silently coerced ghost value', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        transactions: [
+          {
+            id: 'ghost',
+            transaction: {
+              date: ['2026-08-05'],
+              category: 'groceries',
+              kind: 'expense',
+              amountMinor: 500,
+            },
+          },
+        ],
+        budgets: [],
+      }),
+    );
+    await expect(loadStore(filePath)).rejects.toThrow(StorageError);
+  });
+
+  it('rejects a missing/non-array "limits" field as StorageError, not a raw TypeError from .map()', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        transactions: [],
+        budgets: [{ category: 'groceries', rollover: false, limits: undefined }],
+      }),
+    );
+    await expect(loadStore(filePath)).rejects.toThrow(StorageError);
+  });
+
   it('saved file has mode 0600', async () => {
     await saveStore(filePath, sampleStore);
     const mode = statSync(filePath).mode & 0o777;

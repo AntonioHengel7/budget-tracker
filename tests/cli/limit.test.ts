@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setLimit } from '../../src/cli/commands/limit.js';
+import { getStatus } from '../../src/cli/commands/status.js';
+import { resolveLimit } from '../../src/domain/budget.js';
 import { loadStore } from '../../src/storage/jsonStore.js';
 import { ValidationError } from '../../src/domain/errors.js';
 
@@ -45,6 +47,34 @@ describe('setLimit', () => {
     expect(updated.limits).toEqual([
       { effectiveFrom: '2026-08', amountMinor: 10000 },
       { effectiveFrom: '2026-09', amountMinor: 15000 },
+    ]);
+  });
+
+  // Regression (Socrates + Hobbes, PR #7 BLOCKING 1): resolveLimit (domain,
+  // frozen) breaks ties on equal effectiveFrom by keeping the FIRST match --
+  // setting a limit twice at the same period used to append a second entry
+  // instead of correcting the first, so the CLI printed the new amount but
+  // status/resolveLimit silently kept serving the old one.
+  it('replaces (not appends) a limit set again at the same effectiveFrom period', async () => {
+    const first = await setLimit(filePath, {
+      category: 'food',
+      amount: '500',
+      effectiveFrom: '2026-08',
+    });
+    expect(first.limits).toEqual([{ effectiveFrom: '2026-08', amountMinor: 50000 }]);
+
+    const second = await setLimit(filePath, {
+      category: 'food',
+      amount: '600',
+      effectiveFrom: '2026-08',
+    });
+
+    expect(second.limits).toEqual([{ effectiveFrom: '2026-08', amountMinor: 60000 }]);
+    expect(resolveLimit(second, '2026-08')).toEqual({ effectiveFrom: '2026-08', amountMinor: 60000 });
+
+    const status = await getStatus(filePath, { period: '2026-08' });
+    expect(status).toEqual([
+      expect.objectContaining({ category: 'food', limitMinor: 60000 }),
     ]);
   });
 
