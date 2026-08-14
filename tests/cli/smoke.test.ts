@@ -95,6 +95,29 @@ describe('CLI smoke test (real process invocation)', () => {
     expect(stored.transactions[0].transaction.date).toBe(today);
   });
 
+  it('limit set prints the amount for the corrected period, not the array tail, when correcting an earlier period', () => {
+    const first = runCli(['--file', filePath, 'limit', 'set', 'food', '500', '--effective-from', '2026-08']);
+    expect(first.status).toBe(0);
+
+    const second = runCli(['--file', filePath, 'limit', 'set', 'food', '700', '--effective-from', '2026-09']);
+    expect(second.status).toBe(0);
+
+    // Correcting the earlier period must not print the amount belonging to
+    // the later period, which would happen if the confirmation message
+    // assumed the just-set limit is always the last entry in the array.
+    const correction = runCli(['--file', filePath, 'limit', 'set', 'food', '600', '--effective-from', '2026-08']);
+    expect(correction.status).toBe(0);
+    expect(correction.stdout).toContain('600.00');
+    expect(correction.stdout).toContain('effective 2026-08');
+    expect(correction.stdout).not.toContain('700.00');
+
+    const stored = JSON.parse(readFileSync(filePath, 'utf-8'));
+    expect(stored.budgets[0].limits).toEqual([
+      { effectiveFrom: '2026-08', amountMinor: 60000 },
+      { effectiveFrom: '2026-09', amountMinor: 70000 },
+    ]);
+  });
+
   it('exits 1 with a one-line stderr message on a handled validation error', () => {
     expect(() =>
       execFileSync('node', [CLI_PATH, '--file', filePath, 'add', '-5', 'groceries', '--kind', 'expense'], {

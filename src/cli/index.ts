@@ -141,9 +141,9 @@ limitCommand
     await run(async () => {
       const filePath = resolveFilePath();
       const budget = await setLimit(filePath, { ...options, category, amount });
-      const latest = budget.limits[budget.limits.length - 1];
+      const matched = budget.limits.find((limit) => limit.effectiveFrom === options.effectiveFrom);
       console.log(
-        `set limit for "${budget.category}": ${latest ? formatAmount(latest.amountMinor) : 'n/a'} effective ${options.effectiveFrom} (rollover: ${budget.rollover})`,
+        `set limit for "${budget.category}": ${matched ? formatAmount(matched.amountMinor) : 'n/a'} effective ${options.effectiveFrom} (rollover: ${budget.rollover})`,
       );
     });
   });
