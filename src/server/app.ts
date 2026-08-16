@@ -1,0 +1,227 @@
+import { join } from 'node:path';
+import express from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
+import cookieParser from 'cookie-parser';
+import { addTransaction } from '../cli/commands/add.js';
+import type { AddOptions } from '../cli/commands/add.js';
+import { removeTransaction } from '../cli/commands/rm.js';
+import { listTransactions } from '../cli/commands/list.js';
+import type { ListOptions } from '../cli/commands/list.js';
+import { setLimit } from '../cli/commands/limit.js';
+import type { SetLimitOptions } from '../cli/commands/limit.js';
+import { getStatus } from '../cli/commands/status.js';
+import { getSummary } from '../cli/commands/summary.js';
+import { todayIsoDate, currentPeriod } from '../shared/clock.js';
+import { DomainError } from '../domain/errors.js';
+import { StorageError } from '../storage/jsonStore.js';
+import { authenticate } from './credentials.js';
+import type { Credential } from './credentials.js';
+import { resolveUserStorePath } from './paths.js';
+import { signSession } from './session.js';
+import { createAuthMiddleware } from './authMiddleware.js';
+
+export interface AppConfig {
+  readonly dataDir: string;
+  readonly credentials: Credential[];
+  readonly sessionSecret: string;
+  /** When set, serves this directory as the built frontend, with a SPA fallback for non-API routes. */
+  readonly staticDir?: string;
+}
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+function sessionCookieOptions(): {
+  httpOnly: true;
+  sameSite: 'lax';
+  secure: boolean;
+  path: string;
+} {
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env['NODE_ENV'] === 'production',
+    path: '/',
+  };
+}
+
+/** Reads `body[key]` as a string, or `undefined` if absent/not a string. */
+function stringField(body: unknown, key: string): string | undefined {
+  if (typeof body !== 'object' || body === null) {
+    return undefined;
+  }
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Reads `body[key]` as a boolean, or `undefined` if absent/not a boolean. */
+function booleanField(body: unknown, key: string): boolean | undefined {
+  if (typeof body !== 'object' || body === null) {
+    return undefined;
+  }
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+/** Reads `query[key]` as a string, or `undefined` if absent/not a plain string. */
+function queryString(query: Request['query'], key: string): string | undefined {
+  const value = query[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function buildListOptions(query: Request['query']): ListOptions {
+  const from = queryString(query, 'from');
+  const to = queryString(query, 'to');
+  const category = queryString(query, 'category');
+  const kind = queryString(query, 'kind');
+  const note = queryString(query, 'note');
+  return {
+    ...(from !== undefined ? { from } : {}),
+    ...(to !== undefined ? { to } : {}),
+    ...(category !== undefined ? { category } : {}),
+    ...(kind !== undefined ? { kind } : {}),
+    ...(note !== undefined ? { note } : {}),
+  };
+}
+
+/**
+ * Builds the Express app. Every data-touching route resolves the per-user
+ * store path from `req.username` (set by the auth middleware from the
+ * verified session cookie) -- never from client-supplied request body/query
+ * fields -- so a request can never read or write another user's data.
+ */
+export function createApp(config: AppConfig): Express {
+  const app = express();
+  app.use(express.json());
+  app.use(cookieParser());
+
+  app.get('/healthz', (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true });
+  });
+
+  app.post('/api/login', async (req: Request, res: Response) => {
+    const username = stringField(req.body, 'username');
+    const password: unknown =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as Record<string, unknown>)['password']
+        : undefined;
+
+    if (username === undefined) {
+      res.status(401).json({ error: 'invalid credentials' });
+      return;
+    }
+
+    const ok = await authenticate(config.credentials, username, password);
+    if (!ok) {
+      res.status(401).json({ error: 'invalid credentials' });
+      return;
+    }
+
+    const token = signSession(username, config.sessionSecret);
+    res.cookie('session', token, { ...sessionCookieOptions(), maxAge: THIRTY_DAYS_MS });
+    res.status(200).json({ username });
+  });
+
+  app.post('/api/logout', (_req: Request, res: Response) => {
+    res.clearCookie('session', sessionCookieOptions());
+    res.status(200).json({ ok: true });
+  });
+
+  const authMiddleware = createAuthMiddleware(config.sessionSecret);
+  const api = express.Router();
+  api.use(authMiddleware);
+
+  api.get('/me', (req: Request, res: Response) => {
+    res.status(200).json({ username: req.username });
+  });
+
+  api.get('/transactions', async (req: Request, res: Response) => {
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const results = await listTransactions(filePath, buildListOptions(req.query));
+    res.status(200).json(results);
+  });
+
+  api.post('/transactions', async (req: Request, res: Response) => {
+    const amount = stringField(req.body, 'amount');
+    const category = stringField(req.body, 'category');
+    const kind = stringField(req.body, 'kind');
+    const note = stringField(req.body, 'note');
+    const date = stringField(req.body, 'date') ?? todayIsoDate();
+
+    if (amount === undefined || category === undefined || kind === undefined) {
+      res.status(400).json({ error: 'amount, category, and kind are required' });
+      return;
+    }
+
+    const options: AddOptions = { amount, category, kind, date, ...(note !== undefined ? { note } : {}) };
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const result = await addTransaction(filePath, options);
+    res.status(201).json(result);
+  });
+
+  api.delete('/transactions/:id', async (req: Request, res: Response) => {
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const removed = await removeTransaction(filePath, req.params['id'] as string);
+    res.status(200).json(removed);
+  });
+
+  api.put('/limits', async (req: Request, res: Response) => {
+    const category = stringField(req.body, 'category');
+    const amount = stringField(req.body, 'amount');
+    const effectiveFrom = stringField(req.body, 'effectiveFrom');
+    const rollover = booleanField(req.body, 'rollover');
+
+    if (category === undefined || amount === undefined || effectiveFrom === undefined) {
+      res.status(400).json({ error: 'category, amount, and effectiveFrom are required' });
+      return;
+    }
+
+    const options: SetLimitOptions = {
+      category,
+      amount,
+      effectiveFrom,
+      ...(rollover !== undefined ? { rollover } : {}),
+    };
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const budget = await setLimit(filePath, options);
+    res.status(200).json(budget);
+  });
+
+  api.get('/status', async (req: Request, res: Response) => {
+    const period = queryString(req.query, 'period') ?? currentPeriod();
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const results = await getStatus(filePath, { period });
+    res.status(200).json(results);
+  });
+
+  api.get('/summary', async (req: Request, res: Response) => {
+    const period = queryString(req.query, 'period') ?? currentPeriod();
+    const filePath = resolveUserStorePath(config.dataDir, req.username as string);
+    const result = await getSummary(filePath, { period });
+    res.status(200).json(result);
+  });
+
+  app.use('/api', api);
+
+  const { staticDir } = config;
+  if (staticDir !== undefined) {
+    app.use(express.static(staticDir));
+    // Any non-API path falls back to the SPA's index.html for client-side routing.
+    app.get(/^\/(?!api\/).*/, (_req: Request, res: Response) => {
+      res.sendFile(join(staticDir, 'index.html'));
+    });
+  }
+
+  // Express 5 forwards rejected promises from async handlers to this error
+  // middleware automatically -- no manual try/catch needed in the routes above.
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof DomainError || err instanceof StorageError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  });
+
+  return app;
+}
