@@ -5,6 +5,7 @@ coverage/
 *.tsbuildinfo
 .env
 budget.json
+data/
 .claude/worktrees/
 .claude/freeze.lock
 tasks/pre-compact-state.md
