@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { assertValidUsername } from './paths.js';
+import { assertValidUsername, InvalidUsernameError } from './paths.js';
 
 /** Raised for any failure parsing/validating the `AUTH_USERS_JSON` env var. */
 export class CredentialsConfigError extends Error {
@@ -14,6 +14,30 @@ export interface Credential {
   readonly passwordHash: string;
 }
 
+/**
+ * The one pinned bcrypt cost factor every hash in `AUTH_USERS_JSON` must
+ * use. This is the single source of truth for "the cost the constant-time
+ * comparison in `authenticate` depends on" -- `DUMMY_HASH` below is derived
+ * from it (not a second hardcoded literal), and `loadCredentials` rejects
+ * any configured hash whose cost doesn't match it. Without this pinning, a
+ * configured hash at a different cost than the dummy hash reopens the exact
+ * username-timing oracle `authenticate` exists to close: cost 12 vs. this
+ * constant produces a measurable delta, and cost 4 vs. this constant
+ * inverts it (known user faster than unknown).
+ */
+export const BCRYPT_COST = 10;
+
+// $2a/$2b/$2y prefix, two-digit cost, then a 53-char base64-like salt+hash.
+const BCRYPT_HASH_PATTERN = /^\$2[aby]\$(\d{2})\$[A-Za-z0-9./]{53}$/;
+
+function parseBcryptHash(hash: string): { cost: number } | null {
+  const match = BCRYPT_HASH_PATTERN.exec(hash);
+  if (!match || !match[1]) {
+    return null;
+  }
+  return { cost: Number(match[1]) };
+}
+
 function isCredential(value: unknown): value is Credential {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -25,12 +49,15 @@ function isCredential(value: unknown): value is Credential {
 /**
  * Parses the raw `AUTH_USERS_JSON` env var value into a list of credentials.
  * Throws `CredentialsConfigError` for anything malformed -- missing env var,
- * invalid JSON, non-array JSON, or entries missing required fields. Throws
- * `InvalidUsernameError` (from `./paths.js`) if any entry's username doesn't
- * match the canonical username shape -- enforced here, at config-load time,
- * so an invalid username (e.g. one containing the `.` that `session.ts`
- * uses as a token delimiter) can never reach `session.ts` or get signed
- * into a token in the first place.
+ * invalid JSON, non-array JSON, entries missing required fields, an entry
+ * whose username doesn't match the canonical username shape (enforced here,
+ * at config-load time, so an invalid username -- e.g. one containing the
+ * `.` that `session.ts` uses as a token delimiter -- can never reach
+ * `session.ts` or get signed into a token in the first place), or an entry
+ * whose `passwordHash` isn't a well-formed bcrypt hash at the pinned cost
+ * factor (`BCRYPT_COST`) -- required for `authenticate`'s constant-time
+ * guarantee to actually hold. This is a single documented error type: a
+ * caller only ever needs to catch `CredentialsConfigError`.
  */
 export function loadCredentials(raw: string | undefined): Credential[] {
   if (raw === undefined || raw === '') {
@@ -54,7 +81,27 @@ export function loadCredentials(raw: string | undefined): Credential[] {
         'AUTH_USERS_JSON entries must each have a string "username" and "passwordHash"',
       );
     }
-    assertValidUsername(entry.username);
+
+    try {
+      assertValidUsername(entry.username);
+    } catch (err) {
+      if (err instanceof InvalidUsernameError) {
+        throw new CredentialsConfigError(`AUTH_USERS_JSON has an invalid username: ${err.message}`);
+      }
+      throw err;
+    }
+
+    const shape = parseBcryptHash(entry.passwordHash);
+    if (!shape) {
+      throw new CredentialsConfigError(
+        `AUTH_USERS_JSON passwordHash for "${entry.username}" is not a well-formed bcrypt hash`,
+      );
+    }
+    if (shape.cost !== BCRYPT_COST) {
+      throw new CredentialsConfigError(
+        `AUTH_USERS_JSON passwordHash for "${entry.username}" has bcrypt cost ${shape.cost}, expected ${BCRYPT_COST}`,
+      );
+    }
   }
 
   return parsed;
@@ -88,12 +135,13 @@ export function verifyPassword(password: unknown, passwordHash: string): Promise
   return bcrypt.compare(password, passwordHash);
 }
 
-// A valid-format bcrypt hash that no real password will ever match, used by
-// `authenticate` below to keep the bcrypt compare cost constant regardless
-// of whether the username exists -- otherwise an unknown-username request
-// returns in microseconds (object lookup) instead of ~100ms (bcrypt
-// compare), which is itself a timing side-channel revealing valid usernames.
-const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-constant-time-compare', 10);
+// A valid-format bcrypt hash, at the pinned BCRYPT_COST, that no real
+// password will ever match. Used by `authenticate` below to keep the
+// bcrypt compare cost constant regardless of whether the username exists --
+// otherwise an unknown-username request returns in microseconds (object
+// lookup) instead of ~100ms (bcrypt compare), which is itself a timing
+// side-channel revealing valid usernames.
+const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-constant-time-compare', BCRYPT_COST);
 
 /**
  * Authenticates a username/password pair against a list of credentials.

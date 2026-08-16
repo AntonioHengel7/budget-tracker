@@ -2,17 +2,22 @@ import { describe, expect, it, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
 import {
   authenticate,
+  BCRYPT_COST,
   CredentialsConfigError,
   findCredential,
   loadCredentials,
   verifyPassword,
 } from '../../src/server/credentials.js';
-import { InvalidUsernameError } from '../../src/server/paths.js';
+
+// A real, well-formed bcrypt hash at the pinned cost -- loadCredentials now
+// validates hash shape and cost, so tests need a genuine hash rather than
+// the '$2a$...' placeholder the original frozen test used.
+const VALID_HASH = bcrypt.hashSync('placeholder-password', BCRYPT_COST);
 
 describe('loadCredentials', () => {
   it('parses a valid JSON array', () => {
-    const json = JSON.stringify([{ username: 'antonio', passwordHash: '$2a$...' }]);
-    expect(loadCredentials(json)).toEqual([{ username: 'antonio', passwordHash: '$2a$...' }]);
+    const json = JSON.stringify([{ username: 'antonio', passwordHash: VALID_HASH }]);
+    expect(loadCredentials(json)).toEqual([{ username: 'antonio', passwordHash: VALID_HASH }]);
   });
 
   it('throws when the env var is unset', () => {
@@ -35,9 +40,20 @@ describe('loadCredentials', () => {
     expect(() => loadCredentials(JSON.stringify([{ username: 'a' }]))).toThrow(CredentialsConfigError);
   });
 
-  it('throws InvalidUsernameError when an entry has a username outside the canonical shape', () => {
-    const json = JSON.stringify([{ username: 'antonio.h', passwordHash: '$2a$...' }]);
-    expect(() => loadCredentials(json)).toThrow(InvalidUsernameError);
+  it('throws CredentialsConfigError (not InvalidUsernameError) when an entry has a username outside the canonical shape', () => {
+    const json = JSON.stringify([{ username: 'antonio.h', passwordHash: VALID_HASH }]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
+  });
+
+  it('throws CredentialsConfigError when a passwordHash is not a well-formed bcrypt hash', () => {
+    const json = JSON.stringify([{ username: 'antonio', passwordHash: 'not-a-bcrypt-hash' }]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
+  });
+
+  it('throws CredentialsConfigError when a passwordHash uses the wrong bcrypt cost', () => {
+    const wrongCostHash = bcrypt.hashSync('placeholder-password', BCRYPT_COST + 2);
+    const json = JSON.stringify([{ username: 'antonio', passwordHash: wrongCostHash }]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
   });
 });
 
