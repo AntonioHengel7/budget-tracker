@@ -6,6 +6,12 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/server/app.js';
 
+// supertest talks plain HTTP, never HTTPS -- a Secure-flagged cookie (the
+// createApp default, per #17's review) is correctly never replayed by
+// superagent's cookie jar back to a plain-HTTP origin. Every createApp() call
+// below that relies on an authenticated round trip opts into insecureCookies
+// for that reason, exactly as a real local-HTTP (non-Fly, non-TLS) deployment
+// would need to via INSECURE_COOKIES=true.
 describe('web API', () => {
   let dataDir: string;
   let app: ReturnType<typeof createApp>;
@@ -19,6 +25,7 @@ describe('web API', () => {
       dataDir,
       credentials: [{ username: 'antonio', passwordHash }],
       sessionSecret: 'test-secret',
+      insecureCookies: true,
     });
   });
 
@@ -99,6 +106,7 @@ describe('web API', () => {
       dataDir,
       credentials: [{ username: 'antonio', passwordHash }],
       sessionSecret: 'a-completely-different-secret',
+      insecureCookies: true,
     });
     const loginOnOther = await request(otherApp)
       .post('/api/login')
@@ -127,5 +135,58 @@ describe('web API', () => {
     expect(apiFallthrough.status).not.toBe(200);
 
     await rm(tmpWeb, { recursive: true, force: true });
+  });
+
+  it('maps a corrupted store file to a generic 500 without leaking the file path or internal message', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+    // Write a corrupted store file directly, bypassing the API, to simulate a
+    // hand-edited or otherwise corrupted store -- loadStore throws a
+    // StorageError whose message embeds the absolute file path.
+    await writeFile(join(dataDir, 'antonio.json'), '{not valid json', 'utf-8');
+
+    const res = await agent.get('/api/status?period=2026-08');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+    const raw = JSON.stringify(res.body);
+    expect(raw).not.toContain(dataDir);
+    expect(raw).not.toContain('antonio.json');
+    expect(raw).not.toContain('invalid JSON');
+  });
+
+  it('rejects a malformed JSON request body with a clean 400, not a 500', async () => {
+    const res = await request(app)
+      .post('/api/login')
+      .set('content-type', 'application/json')
+      .send('{not valid json');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'malformed JSON request body' });
+  });
+
+  it('rate-limits repeated /api/login attempts from the same IP', async () => {
+    const limitedApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      loginRateLimit: { windowMs: 60_000, max: 3 },
+    });
+
+    const agent = request.agent(limitedApp);
+    for (let i = 0; i < 3; i += 1) {
+      const res = await agent.post('/api/login').send({ username: 'antonio', password: 'wrong' });
+      expect(res.status).toBe(401);
+    }
+
+    const limited = await agent.post('/api/login').send({ username: 'antonio', password: 'wrong' });
+    expect(limited.status).toBe(429);
+
+    // Even correct credentials are rate-limited once the window is exhausted.
+    const limitedWithCorrectPassword = await agent
+      .post('/api/login')
+      .send({ username: 'antonio', password: PASSWORD });
+    expect(limitedWithCorrectPassword.status).toBe(429);
   });
 });

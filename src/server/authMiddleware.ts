@@ -3,12 +3,27 @@ import { verifySession } from './session.js';
 
 /** Augments Express's `Request` with the session-derived, authenticated username. */
 declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       username?: string;
     }
   }
+}
+
+/**
+ * A `Request` on which `req.username` is guaranteed to be a real, verified
+ * string -- never `undefined`, and never reached via an `as string` cast.
+ * Only `isAuthenticatedRequest` below narrows a plain `Request` into this
+ * type, and it only returns `true` once `authMiddleware` has actually set
+ * `req.username` from a verified session.
+ */
+export interface AuthenticatedRequest extends Request {
+  readonly username: string;
+}
+
+/** Runtime narrowing check -- the only place a `Request` becomes an `AuthenticatedRequest`. */
+export function isAuthenticatedRequest(req: Request): req is AuthenticatedRequest {
+  return typeof req.username === 'string';
 }
 
 /**
