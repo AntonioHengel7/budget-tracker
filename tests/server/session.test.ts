@@ -37,4 +37,17 @@ describe('session sign/verify', () => {
     expect(verifySession('', SECRET)).toBeNull();
     expect(verifySession('a.b', SECRET)).toBeNull();
   });
+
+});
+
+describe('session secret guard', () => {
+  it('signSession throws on an empty secret instead of silently signing a forgeable token', () => {
+    expect(() => signSession('bob', '')).toThrow();
+  });
+
+  it('verifySession rejects (never validates) a token when checked against an empty secret', () => {
+    const now = 1_700_000_000;
+    const token = signSession('bob', 'a-real-secret', now);
+    expect(verifySession(token, '', now + 10)).toBeNull();
+  });
 });
