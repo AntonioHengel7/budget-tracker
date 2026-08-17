@@ -26,8 +26,16 @@ export function App(): React.JSX.Element {
   }
 
   async function handleLogout(): Promise<void> {
-    await logout();
-    setAuth({ status: 'loggedOut' });
+    // The UI must drop into the logged-out state regardless of whether the
+    // server call succeeds -- a failed POST /api/logout (network error, etc.)
+    // should not leave the user stuck in the logged-in shell with a
+    // non-functional Log out button. Worst case the session cookie lingers
+    // server-side until its TTL, which is an accepted pre-existing tradeoff.
+    try {
+      await logout();
+    } finally {
+      setAuth({ status: 'loggedOut' });
+    }
   }
 
   if (auth.status === 'checking') {

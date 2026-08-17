@@ -90,7 +90,20 @@ export interface SetLimitInput {
   readonly rollover?: boolean;
 }
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  /**
+   * The response's HTTP status code, when a response was actually received
+   * (e.g. `429` for a rate-limited login). Undefined for failures that never
+   * produced a `Response` at all (network error) or for a `Response`-shaped
+   * test double that omits `status`.
+   */
+  readonly status: number | undefined;
+
+  constructor(message: string, status: number | undefined) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function parseErrorMessage(res: Response): Promise<string> {
   try {
@@ -120,7 +133,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    throw new ApiError(await parseErrorMessage(res));
+    throw new ApiError(await parseErrorMessage(res), res.status);
   }
 
   if (res.status === 204) {

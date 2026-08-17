@@ -1,17 +1,11 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { ApiError, login } from '../api.js';
 
 export interface LoginProps {
   readonly onLoggedIn: (username: string) => void;
 }
 
-/**
- * Calls `/api/login` directly (rather than going through `api.ts`'s `login`)
- * because a failed response here must never call `res.json()` -- the frozen
- * test's failure-path mock (`{ ok: false }`) has no `json` method, matching
- * a real 401 response that this component treats as "show a generic invalid
- * credentials message", not "parse the error body".
- */
 export function Login({ onLoggedIn }: LoginProps): React.JSX.Element {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -21,20 +15,19 @@ export function Login({ onLoggedIn }: LoginProps): React.JSX.Element {
     event.preventDefault();
     setError(null);
 
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-
-    if (!res.ok) {
-      setError('invalid username or password');
-      return;
+    try {
+      const body = await login(username, password);
+      onLoggedIn(body.username);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        setError('too many login attempts -- try again in a few minutes');
+      } else {
+        // Covers 401s, any other non-2xx status, and network failures (fetch
+        // rejecting outright), all of which are indistinguishable from the
+        // user's point of view: something about this attempt didn't work.
+        setError('invalid username or password');
+      }
     }
-
-    const body = (await res.json()) as { username: string };
-    onLoggedIn(body.username);
   }
 
   return (
