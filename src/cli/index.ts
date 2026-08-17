@@ -7,24 +7,7 @@ import { setLimit } from './commands/limit.js';
 import { getStatus } from './commands/status.js';
 import { getSummary } from './commands/summary.js';
 import { formatAmount, formatPercent, formatSignedAmount, formatTable } from './format.js';
-
-/**
- * `new Date()` is used only here, in the CLI wiring layer -- never inside
- * src/domain/**. Defaults are computed once per invocation and formatted
- * into the domain's IsoDate/Period string shapes before crossing the
- * handler boundary.
- */
-function todayIsoDate(): string {
-  const now = new Date();
-  const year = String(now.getFullYear()).padStart(4, '0');
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function currentPeriod(): string {
-  return todayIsoDate().slice(0, 7);
-}
+import { todayIsoDate, currentPeriod } from '../shared/clock.js';
 
 const program = new Command();
 
