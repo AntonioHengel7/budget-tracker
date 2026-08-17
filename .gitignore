@@ -9,3 +9,5 @@ data/
 .claude/worktrees/
 .claude/freeze.lock
 tasks/pre-compact-state.md
+web/node_modules
+web/dist
