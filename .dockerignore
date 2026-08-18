@@ -13,6 +13,8 @@ tasks
 coverage
 .env
 .env.*
+**/.env
+**/.env.*
 .DS_Store
 .github
 .jome

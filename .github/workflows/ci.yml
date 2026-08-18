@@ -20,6 +20,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run cover
       - run: bash .claude/hooks/lib/coverage-gate.sh --mode bar --core-threshold 95
+      - run: docker build -t budget-tracker:ci .
 
   web:
     runs-on: ubuntu-latest

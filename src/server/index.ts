@@ -87,10 +87,14 @@ export function boot(): Booted {
   const port = parsePort(readEnv('PORT'));
   const trustProxy = parseTrustProxy(readEnv('TRUST_PROXY'));
   const insecureCookies = readEnv('INSECURE_COOKIES') === 'true';
-  // Optional: the directory containing the built frontend (`web/dist` in a
-  // single-container deploy). Left undefined when unset, matching
-  // `AppConfig.staticDir?` -- `createApp` simply serves API-only in that case.
-  const staticDir = readEnv('STATIC_DIR');
+  // Optional: the directory containing the built frontend (`web-dist` in the
+  // single-container deploy image -- see the Dockerfile's runtime stage).
+  // Left undefined when unset *or* explicitly set to "", matching
+  // `AppConfig.staticDir?` -- `createApp` simply serves API-only in that
+  // case. An empty string is treated the same as unset (not a real path),
+  // consistent with how SESSION_SECRET rejects "" above.
+  const rawStaticDir = readEnv('STATIC_DIR');
+  const staticDir = rawStaticDir === '' ? undefined : rawStaticDir;
 
   const app = createApp({
     dataDir,

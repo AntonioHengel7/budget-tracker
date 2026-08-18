@@ -19,16 +19,22 @@ RUN npm run build
 
 # --- Stage 3: runtime --------------------------------------------------------
 FROM node:22-alpine AS runtime
+RUN apk add --no-cache su-exec
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=server-build /app/dist ./dist
 COPY --from=web-build /app/web/dist ./web-dist
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENV STATIC_DIR=/app/web-dist
 ENV PORT=8080
 EXPOSE 8080
 
-USER node
+# The /data volume (and root-owned WORKDIR) aren't chowned to the `node` user
+# by Fly/Docker, so we start as root, let entrypoint.sh chown the data dir,
+# then drop to `node` via su-exec before exec'ing the real process -- see #19.
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "dist/server/index.js"]

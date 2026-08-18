@@ -79,24 +79,36 @@ describe('boot', () => {
 
   it('wires STATIC_DIR through to the app, serving the SPA for a non-API route', async () => {
     const tmpWeb = await mkdtemp(join(tmpdir(), 'budget-static-dir-test-'));
-    await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
+    try {
+      await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
 
-    vi.stubEnv('SESSION_SECRET', VALID_SECRET);
-    vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
-    vi.stubEnv('STATIC_DIR', tmpWeb);
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('STATIC_DIR', tmpWeb);
 
-    const { app } = boot();
-    const res = await request(app).get('/some/client/route');
-    expect(res.status).toBe(200);
-    expect(res.text).toContain('<title>t</title>');
-
-    await rm(tmpWeb, { recursive: true, force: true });
+      const { app } = boot();
+      const res = await request(app).get('/some/client/route');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<title>t</title>');
+    } finally {
+      await rm(tmpWeb, { recursive: true, force: true });
+    }
   });
 
   it('leaves the app API-only (no SPA fallback) when STATIC_DIR is unset', async () => {
     vi.stubEnv('SESSION_SECRET', VALID_SECRET);
     vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
     vi.stubEnv('STATIC_DIR', undefined);
+
+    const { app } = boot();
+    const res = await request(app).get('/some/client/route');
+    expect(res.status).toBe(404);
+  });
+
+  it('treats an empty STATIC_DIR the same as unset, not as process.cwd()', async () => {
+    vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+    vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+    vi.stubEnv('STATIC_DIR', '');
 
     const { app } = boot();
     const res = await request(app).get('/some/client/route');
