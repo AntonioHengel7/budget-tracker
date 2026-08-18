@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { boot } from '../../src/server/index.js';
 
@@ -71,5 +75,31 @@ describe('boot', () => {
     vi.stubEnv('AUTH_USERS_JSON', '{not json');
 
     expect(() => boot()).toThrow(/Invalid AUTH_USERS_JSON/);
+  });
+
+  it('wires STATIC_DIR through to the app, serving the SPA for a non-API route', async () => {
+    const tmpWeb = await mkdtemp(join(tmpdir(), 'budget-static-dir-test-'));
+    await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
+
+    vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+    vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+    vi.stubEnv('STATIC_DIR', tmpWeb);
+
+    const { app } = boot();
+    const res = await request(app).get('/some/client/route');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<title>t</title>');
+
+    await rm(tmpWeb, { recursive: true, force: true });
+  });
+
+  it('leaves the app API-only (no SPA fallback) when STATIC_DIR is unset', async () => {
+    vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+    vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+    vi.stubEnv('STATIC_DIR', undefined);
+
+    const { app } = boot();
+    const res = await request(app).get('/some/client/route');
+    expect(res.status).toBe(404);
   });
 });

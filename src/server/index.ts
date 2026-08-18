@@ -87,8 +87,19 @@ export function boot(): Booted {
   const port = parsePort(readEnv('PORT'));
   const trustProxy = parseTrustProxy(readEnv('TRUST_PROXY'));
   const insecureCookies = readEnv('INSECURE_COOKIES') === 'true';
+  // Optional: the directory containing the built frontend (`web/dist` in a
+  // single-container deploy). Left undefined when unset, matching
+  // `AppConfig.staticDir?` -- `createApp` simply serves API-only in that case.
+  const staticDir = readEnv('STATIC_DIR');
 
-  const app = createApp({ dataDir, credentials, sessionSecret, trustProxy, insecureCookies });
+  const app = createApp({
+    dataDir,
+    credentials,
+    sessionSecret,
+    trustProxy,
+    insecureCookies,
+    ...(staticDir !== undefined ? { staticDir } : {}),
+  });
 
   return { app, port };
 }

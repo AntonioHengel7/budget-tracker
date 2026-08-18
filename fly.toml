@@ -1,0 +1,37 @@
+# Fly.io deploy config for budget-tracker.
+#
+# `app` is a placeholder -- set it via `fly launch` (which will offer to
+# rewrite this file) or replace it manually before the first `fly deploy`.
+app = "budget-tracker-CHANGE-ME"
+primary_region = "iad"
+
+[build]
+
+[env]
+  DATA_DIR = "/data"
+  # Fly.io's edge proxy is a single hop to the app -- see the matching
+  # DEFAULT_TRUST_PROXY doc comment in src/server/index.ts. Set explicitly
+  # here (rather than relying on that code default) so the deploy config
+  # itself is unambiguous about the trust-proxy topology it assumes.
+  TRUST_PROXY = "1"
+
+# SESSION_SECRET and AUTH_USERS_JSON are secrets -- never set them here.
+# Configure them with `fly secrets set SESSION_SECRET=... AUTH_USERS_JSON=...`.
+
+[[mounts]]
+  source = "budget_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "5s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
