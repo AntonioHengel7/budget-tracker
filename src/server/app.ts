@@ -22,7 +22,8 @@ import { signSession } from './session.js';
 import { createAuthMiddleware, isAuthenticatedRequest } from './authMiddleware.js';
 import type { AuthenticatedRequest } from './authMiddleware.js';
 
-export interface LoginRateLimitConfig {
+/** Shape shared by every `express-rate-limit` config knob this app exposes. */
+export interface RateLimitConfig {
   readonly windowMs: number;
   readonly max: number;
 }
@@ -45,7 +46,14 @@ export interface AppConfig {
    */
   readonly trustProxy?: number;
   /** Overrides the default login rate limit -- mainly so tests don't need to wait out a real 15-minute window. */
-  readonly loginRateLimit?: LoginRateLimitConfig;
+  readonly loginRateLimit?: RateLimitConfig;
+  /**
+   * Overrides the default general `/api/*` rate limit -- mainly so tests
+   * don't need to wait out a real 1-minute window. Applies to every `/api/*`
+   * route, stacked on top of (not instead of) `loginRateLimit` for
+   * `/api/login`, which stays tighter.
+   */
+  readonly apiRateLimit?: RateLimitConfig;
   /**
    * Opts the session cookie out of the `Secure` flag, for local plaintext-HTTP
    * development only. Defaults to `false` -- cookies are `Secure` by default
@@ -56,9 +64,24 @@ export interface AppConfig {
 }
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-const DEFAULT_LOGIN_RATE_LIMIT: LoginRateLimitConfig = {
+const DEFAULT_LOGIN_RATE_LIMIT: RateLimitConfig = {
   windowMs: 15 * 60 * 1000,
   max: 10,
+};
+/**
+ * General `/api/*` rate limit, applied uniformly to every API route
+ * (including `/api/login`, stacked on top of its own tighter limit above).
+ * Unlike login attempts, normal single-user traffic legitimately re-hits
+ * status/summary/list endpoints often (e.g. a dashboard that refreshes or a
+ * user paging through transactions), so this needs to be generous enough
+ * that the real user never notices it -- 120 requests/minute is ~2 req/s
+ * sustained, well above any real interactive usage pattern, while still
+ * meaningfully throttling a scripted hammering attempt against a
+ * usage-billed machine.
+ */
+const DEFAULT_API_RATE_LIMIT: RateLimitConfig = {
+  windowMs: 60 * 1000,
+  max: 120,
 };
 
 function sessionCookieOptions(config: AppConfig): {
@@ -151,13 +174,36 @@ function isBodyParserSyntaxError(
 export function createApp(config: AppConfig): Express {
   const app = express();
   app.set('trust proxy', config.trustProxy ?? 0);
-  app.use(express.json());
-  app.use(cookieParser());
 
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
   });
 
+  // Registered before any /api route (and before the body parser below) so
+  // it covers every /api route uniformly -- /api/login and /api/logout
+  // (mounted directly below) as well as every route on the `api` sub-router
+  // mounted further down -- and so a request that's about to be throttled
+  // never pays the cost of a full JSON body read/parse first. /healthz above
+  // is outside the /api prefix and is never subject to this (Fly's health
+  // checks must never be throttled). The limiter is purely IP/route based
+  // and never touches the body, so running it before express.json() changes
+  // nothing about its behavior.
+  const generalLimiter = rateLimit({
+    windowMs: config.apiRateLimit?.windowMs ?? DEFAULT_API_RATE_LIMIT.windowMs,
+    limit: config.apiRateLimit?.max ?? DEFAULT_API_RATE_LIMIT.max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'too many requests, try again later' },
+  });
+  app.use('/api', generalLimiter);
+
+  app.use(express.json());
+  app.use(cookieParser());
+
+  // Stacked on top of generalLimiter above: login attempts are much more
+  // sensitive (credential-stuffing risk) than ordinary API traffic, so this
+  // stays tighter and keeps /api/login at least as restrictive as before
+  // this general limiter was introduced.
   const loginLimiter = rateLimit({
     windowMs: config.loginRateLimit?.windowMs ?? DEFAULT_LOGIN_RATE_LIMIT.windowMs,
     limit: config.loginRateLimit?.max ?? DEFAULT_LOGIN_RATE_LIMIT.max,
