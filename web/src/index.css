@@ -1,0 +1,70 @@
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  max-width: 720px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  color: #1a1a1a;
+}
+
+h1,
+h2 {
+  margin-top: 0;
+}
+
+nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+nav button {
+  padding: 0.4rem 0.8rem;
+}
+
+nav button[aria-current='true'] {
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 360px;
+  margin-bottom: 1.5rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid #ddd;
+}
+
+[role='alert'] {
+  color: #b00020;
+}
+
+.status-over {
+  color: #b00020;
+}
+
+.status-at {
+  color: #a06a00;
+}
+
+.status-under {
+  color: #1a7a1a;
+}
