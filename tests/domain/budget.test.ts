@@ -291,6 +291,17 @@ describe('budgetStatus', () => {
     expect(status.pctUsed).toBe(50);
   });
 
+  // Regression (#31): availableMinor used to return the period's spending
+  // ceiling (limitMinor + carryInMinor) unconditionally -- never subtracting
+  // spentMinor -- so "available" reported the same number regardless of how
+  // much had already been spent. It must report what's actually left to
+  // spend, while state/pctUsed keep using the ceiling unchanged.
+  it('availableMinor reflects remaining spend, not just the ceiling', () => {
+    const status = budgetStatus(budget, [expenseTx('2026-01-05', 'x', 250)], '2026-01');
+    expect(status.availableMinor).toBe(status.limitMinor + status.carryInMinor - status.spentMinor);
+    expect(status.availableMinor).toBe(750);
+  });
+
   it('pctUsed is null when available === 0', () => {
     // Query a period before any limit takes effect: limitMinor is 0 and
     // there is no carry yet, so availableMinor is 0.
