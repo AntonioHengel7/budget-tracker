@@ -189,12 +189,13 @@ export function budgetStatus(
   const limit = resolveLimit(budget, period);
   const limitMinor = limit?.amountMinor ?? 0;
   const carryInMinor = carryover(budget, transactions, period);
-  const availableMinor = addCarryToLimit(limitMinor, carryInMinor);
+  const ceilingMinor = addCarryToLimit(limitMinor, carryInMinor);
   const spentMinor = spentInPeriod(transactions, budget.category, period);
 
   const state: BudgetState =
-    spentMinor > availableMinor ? 'over' : spentMinor === availableMinor ? 'at' : 'under';
-  const pctUsed = availableMinor === 0 ? null : (spentMinor / availableMinor) * 100;
+    spentMinor > ceilingMinor ? 'over' : spentMinor === ceilingMinor ? 'at' : 'under';
+  const pctUsed = ceilingMinor === 0 ? null : (spentMinor / ceilingMinor) * 100;
+  const availableMinor = subtractSpentFromAvailable(ceilingMinor, spentMinor);
 
   return {
     period,

@@ -32,7 +32,7 @@ describe('getStatus', () => {
         category: 'groceries',
         limitMinor: 10000,
         carryInMinor: 0,
-        availableMinor: 10000,
+        availableMinor: 5750,
         spentMinor: 4250,
         state: 'under',
         pctUsed: 42.5,
