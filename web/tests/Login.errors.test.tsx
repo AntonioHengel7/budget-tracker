@@ -2,15 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Login } from '../src/pages/Login.js';
 
-// Covers the error branches added on top of the frozen Login.test.tsx:
-// a 429 (rate-limited) response must show a distinct message rather than
-// the generic invalid-credentials one, and a rejecting fetch (network
-// failure) must be caught rather than becoming an unhandled rejection.
 describe('Login error branches', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
+  // Regression (Socrates, PR #24 round 1 BLOCKING (d)): Login.tsx's bypass
+  // of api.ts's login() misreported a 429 (rate-limited) response as
+  // "invalid credentials" -- the same generic message as a bad password.
+  // It must now show a distinct message so a rate-limited user isn't told
+  // their credentials are wrong.
   it('shows a rate-limit message (not "invalid") on a 429 response', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -30,6 +31,10 @@ describe('Login error branches', () => {
     expect(onLoggedIn).not.toHaveBeenCalled();
   });
 
+  // Regression (Socrates, PR #24 round 1 BLOCKING (b)): Login.tsx's bypass
+  // of api.ts's login() left a rejecting fetch (network failure) uncaught,
+  // producing an unhandled promise rejection instead of a visible error
+  // message.
   it('shows an error (not an unhandled rejection) when fetch rejects with a network error', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch')) as unknown as typeof fetch;
 

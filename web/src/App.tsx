@@ -33,6 +33,8 @@ export function App(): React.JSX.Element {
     // server-side until its TTL, which is an accepted pre-existing tradeoff.
     try {
       await logout();
+    } catch {
+      // logout is best-effort -- always land on logged-out UI state
     } finally {
       setAuth({ status: 'loggedOut' });
     }

@@ -31,7 +31,6 @@ export function Transactions(): React.JSX.Element {
 
   useEffect(() => {
     void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleFilterSubmit(event: FormEvent<HTMLFormElement>): void {

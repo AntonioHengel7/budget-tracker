@@ -8,12 +8,15 @@ export function Limits(): React.JSX.Element {
   const [effectiveFrom, setEffectiveFrom] = useState('');
   const [rollover, setRollover] = useState(false);
   // Tracks whether the user has explicitly interacted with the rollover
-  // checkbox in this form session. The server (src/cli/commands/limit.ts)
-  // preserves a category's existing `rollover` setting when the field is
-  // omitted from the request -- but always sending the checkbox's default
-  // `false` would defeat that and silently flip an existing `rollover: true`
-  // to `false` on any unrelated edit (e.g. bumping the amount). Only include
-  // `rollover` in the request once the user has actually touched the box.
+  // checkbox for the *currently selected category* in this form session.
+  // The server (src/cli/commands/limit.ts) preserves a category's existing
+  // `rollover` setting when the field is omitted from the request -- but
+  // always sending the checkbox's current value would defeat that and
+  // silently flip an existing `rollover: true` to `false` on any unrelated
+  // edit (e.g. bumping the amount), or carry a *different* category's
+  // touched state into this submission after a category switch. Only
+  // include `rollover` in the request once the user has touched the box
+  // for this category since the last category change or successful submit.
   const [rolloverTouched, setRolloverTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<CategoryBudget | null>(null);
@@ -30,6 +33,8 @@ export function Limits(): React.JSX.Element {
         ...(rolloverTouched ? { rollover } : {}),
       });
       setSaved(budget);
+      setRollover(false);
+      setRolloverTouched(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to set limit');
     }
@@ -44,7 +49,15 @@ export function Limits(): React.JSX.Element {
           id="limit-category"
           type="text"
           value={category}
-          onChange={(event) => setCategory(event.target.value)}
+          onChange={(event) => {
+            setCategory(event.target.value);
+            // The rollover checkbox's touched state is only meaningful for
+            // the category it was set against -- switching categories
+            // mid-session must not carry a prior category's rollover
+            // choice into a submit for a different category.
+            setRollover(false);
+            setRolloverTouched(false);
+          }}
           required
         />
 
