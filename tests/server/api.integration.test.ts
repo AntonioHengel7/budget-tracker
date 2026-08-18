@@ -212,6 +212,31 @@ describe('web API', () => {
     expect(limited.status).toBe(429);
   });
 
+  it('counts /api/login requests against the general limiter too, not just the login-specific one', async () => {
+    // apiRateLimit.max is set far below loginRateLimit.max so the general
+    // limiter trips first -- proving /api/login consumes general-limiter
+    // budget on top of its own tighter limiter, and the two can't be used to
+    // bypass each other by exhausting only one of the two independent counters.
+    const limitedApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      apiRateLimit: { windowMs: 60_000, max: 3 },
+      loginRateLimit: { windowMs: 60_000, max: 100 },
+    });
+
+    const agent = request.agent(limitedApp);
+    for (let i = 0; i < 3; i += 1) {
+      const res = await agent.post('/api/login').send({ username: 'antonio', password: 'wrong' });
+      expect(res.status).toBe(401);
+    }
+
+    const limited = await agent.post('/api/login').send({ username: 'antonio', password: 'wrong' });
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ error: 'too many requests, try again later' });
+  });
+
   it('never rate-limits /healthz, even after exceeding the general API limit', async () => {
     const limitedApp = createApp({
       dataDir,

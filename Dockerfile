@@ -31,6 +31,7 @@ RUN chmod +x /entrypoint.sh
 
 ENV STATIC_DIR=/app/web-dist
 ENV PORT=8080
+ENV DATA_DIR=/data
 EXPOSE 8080
 
 # The /data volume (and root-owned WORKDIR) aren't chowned to the `node` user

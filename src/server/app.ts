@@ -174,18 +174,20 @@ function isBodyParserSyntaxError(
 export function createApp(config: AppConfig): Express {
   const app = express();
   app.set('trust proxy', config.trustProxy ?? 0);
-  app.use(express.json());
-  app.use(cookieParser());
 
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
   });
 
-  // Registered before any /api route so it covers every one of them
-  // uniformly -- /api/login and /api/logout (mounted directly below) as well
-  // as every route on the `api` sub-router mounted further down. /healthz
-  // above is outside the /api prefix and is never subject to this (Fly's
-  // health checks must never be throttled).
+  // Registered before any /api route (and before the body parser below) so
+  // it covers every /api route uniformly -- /api/login and /api/logout
+  // (mounted directly below) as well as every route on the `api` sub-router
+  // mounted further down -- and so a request that's about to be throttled
+  // never pays the cost of a full JSON body read/parse first. /healthz above
+  // is outside the /api prefix and is never subject to this (Fly's health
+  // checks must never be throttled). The limiter is purely IP/route based
+  // and never touches the body, so running it before express.json() changes
+  // nothing about its behavior.
   const generalLimiter = rateLimit({
     windowMs: config.apiRateLimit?.windowMs ?? DEFAULT_API_RATE_LIMIT.windowMs,
     limit: config.apiRateLimit?.max ?? DEFAULT_API_RATE_LIMIT.max,
@@ -194,6 +196,9 @@ export function createApp(config: AppConfig): Express {
     message: { error: 'too many requests, try again later' },
   });
   app.use('/api', generalLimiter);
+
+  app.use(express.json());
+  app.use(cookieParser());
 
   // Stacked on top of generalLimiter above: login attempts are much more
   // sensitive (credential-stuffing risk) than ordinary API traffic, so this
