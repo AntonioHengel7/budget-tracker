@@ -189,4 +189,51 @@ describe('web API', () => {
       .send({ username: 'antonio', password: PASSWORD });
     expect(limitedWithCorrectPassword.status).toBe(429);
   });
+
+  it('rate-limits repeated requests to a non-login /api route from the same IP', async () => {
+    const limitedApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      apiRateLimit: { windowMs: 60_000, max: 3 },
+    });
+
+    const agent = request.agent(limitedApp);
+    // Unauthenticated requests still count against the general limiter --
+    // it sits in front of authMiddleware, since even a fast-failing 401
+    // costs compute/bandwidth on a usage-billed machine.
+    for (let i = 0; i < 3; i += 1) {
+      const res = await agent.get('/api/status?period=2026-08');
+      expect(res.status).toBe(401);
+    }
+
+    const limited = await agent.get('/api/status?period=2026-08');
+    expect(limited.status).toBe(429);
+  });
+
+  it('never rate-limits /healthz, even after exceeding the general API limit', async () => {
+    const limitedApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      apiRateLimit: { windowMs: 60_000, max: 3 },
+    });
+
+    const agent = request.agent(limitedApp);
+
+    // Exhaust the general API limit.
+    for (let i = 0; i < 3; i += 1) {
+      await agent.get('/api/status?period=2026-08');
+    }
+    const limited = await agent.get('/api/status?period=2026-08');
+    expect(limited.status).toBe(429);
+
+    // /healthz is unaffected by the exhausted /api limit.
+    for (let i = 0; i < 5; i += 1) {
+      const health = await agent.get('/healthz');
+      expect(health.status).toBe(200);
+    }
+  });
 });
