@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -263,6 +263,24 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
 
     const final = await loadStore(filePath);
     expect(final.transactions).toEqual([txA]);
+  });
+
+  it('honours timeoutMs (does not busy-loop forever) when the lock path is a dangling symlink', async () => {
+    // Regression (Hobbes, PR #50 round 1 BLOCKING): open(lockPath, 'wx')
+    // fails EEXIST on a symlink even when its target doesn't exist, but the
+    // old code inspected it with `stat` (which follows the link) and
+    // treated the resulting ENOENT as "released, retry immediately" --
+    // skipping both the deadline check and the sleep, forever. Any local
+    // user who can write to the store directory could wedge every writer
+    // at 100% CPU by dropping a dangling symlink at `<file>.lock`.
+    const lockPath = `${filePath}.lock`;
+    symlinkSync('/nonexistent-target', lockPath);
+
+    const start = Date.now();
+    await expect(
+      updateStore(filePath, appendMutator(txA), { timeoutMs: 200 }),
+    ).rejects.toThrow(/timed out.*lock/i);
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 
   it('releases the lock even when the mutator throws, and does not persist a partial write', async () => {

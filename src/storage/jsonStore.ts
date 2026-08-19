@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createCategoryBudget } from '../domain/budget.js';
 import type { CategoryBudget } from '../domain/budget.js';
@@ -298,20 +298,23 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
       }
     }
 
+    // lstat, not stat: the staleness decision is about the lock path
+    // itself -- including a dangling symlink dropped at that path -- not
+    // whatever a symlink there might point to.
     try {
-      const lockStats = await stat(lockPath);
+      const lockStats = await lstat(lockPath);
       if (Date.now() - lockStats.mtimeMs > STALE_LOCK_MS) {
         await rm(lockPath, { force: true });
-        continue; // retry the create immediately, no need to sleep
       }
     } catch (statErr) {
-      if (isErrnoException(statErr) && statErr.code === 'ENOENT') {
-        continue; // the other writer released it between our attempts
+      if (!isErrnoException(statErr) || statErr.code !== 'ENOENT') {
+        throw new StorageError(
+          `failed to inspect lock for store file "${filePath}": ${(statErr as Error).message}`,
+          { cause: statErr },
+        );
       }
-      throw new StorageError(
-        `failed to inspect lock for store file "${filePath}": ${(statErr as Error).message}`,
-        { cause: statErr },
-      );
+      // else: the other writer released it between our attempts -- fall
+      // through to the deadline check/sleep below and retry.
     }
 
     if (Date.now() >= deadline) {
