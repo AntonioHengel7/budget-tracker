@@ -166,6 +166,21 @@ function isBodyParserSyntaxError(
 }
 
 /**
+ * `express.json()`'s size limit rejects an oversized body with an
+ * `http-errors`-shaped `PayloadTooLargeError` (not a `SyntaxError`) -- a
+ * plain `Error` with `.type === 'entity.too.large'` and `.status`/
+ * `.statusCode === 413`, thrown by `raw-body` before the JSON parser ever
+ * runs. Checked purely by `.type` (like `isBodyParserSyntaxError` above)
+ * rather than by `instanceof`, since `http-errors` doesn't export a distinct
+ * class for it.
+ */
+function isBodyParserPayloadTooLargeError(
+  err: unknown,
+): err is Error & { status?: number; type?: string } {
+  return err instanceof Error && (err as { type?: string }).type === 'entity.too.large';
+}
+
+/**
  * Builds the Express app. Every data-touching route resolves the per-user
  * store path from `req.username` (set by the auth middleware from the
  * verified session cookie) -- never from client-supplied request body/query
@@ -367,6 +382,15 @@ export function createApp(config: AppConfig): Express {
     // the generic 500 branch below.
     if (isBodyParserSyntaxError(err)) {
       res.status(400).json({ error: 'malformed JSON request body' });
+      return;
+    }
+
+    // A request body exceeding express.json()'s size limit surfaces here as
+    // body-parser's PayloadTooLargeError -- respond with the semantically
+    // correct 413, rather than falling through to the generic 500 branch
+    // below.
+    if (isBodyParserPayloadTooLargeError(err)) {
+      res.status(413).json({ error: 'request body too large' });
       return;
     }
 
