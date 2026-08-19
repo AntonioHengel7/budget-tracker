@@ -1,9 +1,9 @@
 # Fly.io deploy config for budget-tracker.
 #
-# `app` is a placeholder -- set it via `fly launch` (which will offer to
-# rewrite this file) or replace it manually before the first `fly deploy`.
-app = "budget-tracker-CHANGE-ME"
-primary_region = "iad"
+# `app` and `primary_region` are set to the live "moonbudget" deployment.
+# If the app is ever renamed or moved to a different region, update them here.
+app = "moonbudget"
+primary_region = "lax"
 
 [build]
 
