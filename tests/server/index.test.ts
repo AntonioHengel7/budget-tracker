@@ -1,6 +1,7 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import bcrypt from 'bcryptjs';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { boot } from '../../src/server/index.js';
@@ -9,6 +10,7 @@ const VALID_SECRET = 'a'.repeat(32);
 const VALID_AUTH_USERS_JSON = JSON.stringify([
   { username: 'antonio', passwordHash: '$2a$10$' + 'a'.repeat(53) },
 ]);
+const REAL_PASSWORD = 'correct horse battery staple';
 
 describe('boot', () => {
   afterEach(() => {
@@ -113,5 +115,43 @@ describe('boot', () => {
     const { app } = boot();
     const res = await request(app).get('/some/client/route');
     expect(res.status).toBe(404);
+  });
+
+  it('treats an empty DATA_DIR the same as unset, resolving to the default data directory', async () => {
+    // The default DATA_DIR ('data') is relative to process.cwd(), same as
+    // entrypoint.sh's `${DATA_DIR:-/data}` fallback resolving relative to
+    // the container's working directory. Clean up before and after so this
+    // never leaks into other tests or the repo tree (the dir is gitignored,
+    // but a leftover directory could still shadow a later test's default).
+    const defaultDataDir = join(process.cwd(), 'data');
+    await rm(defaultDataDir, { recursive: true, force: true });
+
+    try {
+      const passwordHash = await bcrypt.hash(REAL_PASSWORD, 10); // AUTH_USERS_JSON requires bcrypt cost 10
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', JSON.stringify([{ username: 'antonio', passwordHash }]));
+      vi.stubEnv('DATA_DIR', '');
+      // supertest talks plain HTTP, so a Secure-flagged session cookie would
+      // never be replayed back -- opt into insecureCookies for this
+      // round-trip, same as api.integration.test.ts does.
+      vi.stubEnv('INSECURE_COOKIES', 'true');
+
+      const { app } = boot();
+      const agent = request.agent(app);
+      await agent.post('/api/login').send({ username: 'antonio', password: REAL_PASSWORD });
+      const add = await agent.post('/api/transactions').send({
+        amount: '10',
+        category: 'test',
+        kind: 'expense',
+        date: '2026-08-14',
+      });
+      expect(add.status).toBe(201);
+
+      // Proves DATA_DIR='' resolved to the same default location as unset,
+      // not to some other (e.g. cwd-root or invalid) path.
+      await expect(access(join(defaultDataDir, 'antonio.json'))).resolves.toBeUndefined();
+    } finally {
+      await rm(defaultDataDir, { recursive: true, force: true });
+    }
   });
 });
