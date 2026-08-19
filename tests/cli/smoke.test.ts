@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -153,5 +153,38 @@ describe('CLI smoke test (real process invocation)', () => {
         stderr: expect.stringContaining('amount must be'),
       }),
     );
+  });
+
+  // Regression (Socrates, PR #46 round 3 BLOCKING): the fix at
+  // src/cli/index.ts's two stderr chokepoints (run()'s catch and
+  // main().catch()) had no test exercising it through the real CLI process
+  // -- reverting both to a plain `console.error(message)` still left this
+  // whole suite green. A StorageError message embeds raw, untrusted store
+  // content (see jsonStore.ts's validateBudget), so this spawns the actual
+  // built binary against a store file crafted to trigger one, and asserts
+  // the real stderr bytes -- not a unit test of sanitizeCell in isolation.
+  it('strips terminal control characters from an untrusted store file before printing a StorageError to stderr', () => {
+    const evilCategory = 'rent\x1b[2K\x07';
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        transactions: [],
+        budgets: [{ category: evilCategory, rollover: 'not-a-boolean', limits: [] }],
+      }),
+    );
+
+    let stderr = '';
+    try {
+      execFileSync('node', [CLI_PATH, '--file', filePath, 'list'], { encoding: 'utf-8' });
+      throw new Error('expected the CLI to exit non-zero on a corrupted store file');
+    } catch (err) {
+      stderr = (err as { stderr?: string }).stderr ?? '';
+    }
+
+    expect(stderr).toContain('rollover');
+    // console.error appends its own trailing newline -- trim it before
+    // checking, since that \n isn't part of the (sanitized) message text.
+    expect(stderr.trim()).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   });
 });
