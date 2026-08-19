@@ -16,13 +16,14 @@ export class InvalidUsernameError extends DomainError {
 
 /**
  * The single canonical shape every username in this system must satisfy --
- * lowercase letters, digits, underscore, hyphen; 1-32 chars. This is the one
- * source of truth: `credentials.ts` enforces it at config-load time (so an
- * invalid username can never be signed into a session token), and
+ * letters (either case), digits, underscore, hyphen; 1-32 chars. This is the
+ * one source of truth: `credentials.ts` enforces it at config-load time (so
+ * an invalid username can never be signed into a session token), and
  * `resolveUserStorePath` below enforces it again as a last line of defense
- * against path traversal and other unsafe filenames.
+ * against path traversal and other unsafe filenames. Case is preserved, not
+ * normalized -- "Antonio" and "antonio" are distinct usernames/files.
  */
-const USERNAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
+const USERNAME_PATTERN = /^[a-zA-Z0-9_-]{1,32}$/;
 
 /** Returns whether `username` matches the canonical allowed shape. */
 export function isValidUsername(username: string): boolean {

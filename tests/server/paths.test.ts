@@ -16,11 +16,18 @@ describe('resolveUserStorePath', () => {
     expect(() => resolveUserStorePath('/data', 'a_b-2')).not.toThrow();
   });
 
+  it('accepts uppercase letters, preserving case in the resolved path', () => {
+    expect(resolveUserStorePath('/data', 'AntonioHengel')).toBe('/data/AntonioHengel.json');
+  });
+
+  it('treats usernames differing only in case as distinct (case is not normalized)', () => {
+    expect(resolveUserStorePath('/data', 'Antonio')).not.toBe(resolveUserStorePath('/data', 'antonio'));
+  });
+
   it.each([
     ['empty string', ''],
     ['path traversal', '../../etc/passwd'],
     ['contains a slash', 'a/b'],
-    ['uppercase', 'Antonio'],
     ['contains a dot', 'antonio.json'],
     ['too long', 'a'.repeat(33)],
     ['contains a space', 'antonio hengel'],
@@ -36,6 +43,7 @@ describe('resolveUserStorePath', () => {
 describe('isValidUsername / assertValidUsername', () => {
   it('is the same canonical check resolveUserStorePath uses under the hood', () => {
     expect(isValidUsername('antonio')).toBe(true);
+    expect(isValidUsername('AntonioHengel')).toBe(true);
     expect(isValidUsername('antonio.h')).toBe(false);
     expect(() => assertValidUsername('antonio.h')).toThrow(InvalidUsernameError);
     expect(() => assertValidUsername('antonio')).not.toThrow();
