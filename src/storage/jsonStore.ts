@@ -139,6 +139,32 @@ function validateBudget(entry: unknown, filePath: string): CategoryBudget {
 }
 
 /**
+ * `CategoryBudget` is designed as "one budget per category" -- every
+ * consumer (setLimit's `store.budgets.find`, status/summary lookups) assumes
+ * at most one entry matches a given category and silently takes only the
+ * first/last match otherwise. Nothing upstream of this module can produce a
+ * duplicate through the CLI (setLimit always replaces the single existing
+ * entry for a category), but a hand-edited store file is not bound by that --
+ * two entries sharing a category can slip in directly. Without this check,
+ * `setLimit`'s `filter((budget) => budget.category !== updated.category)`
+ * would silently drop BOTH pre-existing entries for that category on the
+ * very next `limit set`, discarding one of them for good. Reject it here,
+ * the same way every other malformed/inconsistent persisted state is
+ * rejected on load, instead of letting it corrupt silently downstream.
+ */
+function assertNoDuplicateCategories(budgets: readonly CategoryBudget[], filePath: string): void {
+  const seen = new Set<string>();
+  for (const budget of budgets) {
+    if (seen.has(budget.category)) {
+      throw new StorageError(
+        `store file "${filePath}" has more than one budget for category "${budget.category}" -- each category must have at most one budget`,
+      );
+    }
+    seen.add(budget.category);
+  }
+}
+
+/**
  * Loads the store at `filePath`. A missing file returns a fresh empty store
  * (not an error). Every persisted transaction and budget is re-validated
  * through the domain's own constructors before being returned, so a
@@ -189,6 +215,7 @@ export async function loadStore(filePath: string): Promise<PersistedStore> {
     throw new StorageError(`store file "${filePath}" has a non-array "budgets" field`);
   }
   const budgets = (rawBudgets ?? []).map((entry: unknown) => validateBudget(entry, filePath));
+  assertNoDuplicateCategories(budgets, filePath);
 
   return { schemaVersion: SCHEMA_VERSION, transactions, budgets };
 }
