@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatTable } from '../../src/cli/format.js';
+import { formatTable, sanitizeCell } from '../../src/cli/format.js';
 
 describe('formatTable', () => {
   it('renders a simple left-aligned, space-padded table', () => {
@@ -47,5 +47,25 @@ describe('formatTable', () => {
     const table = formatTable(['id', 'note'], [['1', note]]);
 
     expect(table).toContain(note);
+  });
+});
+
+describe('sanitizeCell (exported)', () => {
+  // Regression (Hobbes, PR #46 round 2 BLOCKING): the fix above only
+  // covered formatTable's table cells. StorageError messages built from raw
+  // store content (see jsonStore.ts's validateBudget/validateStoredTransaction)
+  // reach the terminal via src/cli/index.ts's two error-printing
+  // chokepoints without ever passing through formatTable. sanitizeCell is
+  // exported specifically so those chokepoints can reuse the same
+  // stripping logic instead of only covering the table-rendering path.
+  it('strips control characters from an arbitrary string, not just table cells', () => {
+    const message = 'store file "x" has field "budgets[rent\x1b[2K].rollover" that is not a boolean';
+
+    const sanitized = sanitizeCell(message);
+
+    expect(sanitized).not.toContain('\x1b');
+    expect(sanitized).toBe(
+      'store file "x" has field "budgets[rent[2K].rollover" that is not a boolean',
+    );
   });
 });

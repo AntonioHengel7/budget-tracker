@@ -28,14 +28,20 @@ export function formatPercent(pct: number | null): string {
 const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
 
 /**
- * Strips terminal control characters (ESC and friends) from a table cell
- * value before it's ever written to stdout. Values sourced from the store
- * file (e.g. `note`, `category`) are untrusted display data: a crafted
- * control sequence could otherwise manipulate the terminal (move the
- * cursor, erase lines, set the window title, etc). This only affects what
- * gets printed -- the underlying stored value is untouched.
+ * Strips terminal control characters (ESC and friends) from a string before
+ * it's ever written to a terminal (stdout or stderr). Values sourced from
+ * the store file (e.g. `note`, `category`, transaction `id`) are untrusted
+ * display data: a crafted control sequence could otherwise manipulate the
+ * terminal (move the cursor, erase lines, set the window title, etc). This
+ * only affects what gets printed -- the underlying stored value is
+ * untouched.
+ *
+ * Exported so every terminal-writing chokepoint can sanitize on the way
+ * out, not just `formatTable`'s table cells -- error messages built from
+ * store content (see `jsonStore.ts`'s `StorageError`s) flow through
+ * `src/cli/index.ts`'s error handlers and need the same treatment.
  */
-function sanitizeCell(cell: string): string {
+export function sanitizeCell(cell: string): string {
   return cell.replace(CONTROL_CHARS, '');
 }
 

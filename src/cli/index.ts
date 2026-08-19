@@ -6,7 +6,7 @@ import { listTransactions } from './commands/list.js';
 import { setLimit } from './commands/limit.js';
 import { getStatus } from './commands/status.js';
 import { getSummary } from './commands/summary.js';
-import { formatAmount, formatPercent, formatSignedAmount, formatTable } from './format.js';
+import { formatAmount, formatPercent, formatSignedAmount, formatTable, sanitizeCell } from './format.js';
 import { todayIsoDate, currentPeriod } from '../shared/clock.js';
 
 const program = new Command();
@@ -33,7 +33,10 @@ async function run(fn: () => Promise<void>): Promise<void> {
     await fn();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(message);
+    // Error messages can embed raw, untrusted store content (e.g.
+    // StorageError text interpolates a store file's category/id) -- strip
+    // terminal control characters before they reach stderr.
+    console.error(sanitizeCell(message));
     process.exitCode = 1;
   }
 }
@@ -192,6 +195,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  const message = err instanceof Error ? err.message : String(err);
+  // Same untrusted-content concern as run()'s catch above.
+  console.error(sanitizeCell(message));
   process.exitCode = 1;
 });
