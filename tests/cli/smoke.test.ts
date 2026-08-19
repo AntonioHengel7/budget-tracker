@@ -1,8 +1,11 @@
-import { execFileSync, execSync } from 'node:child_process';
+import { execFile, execFileSync, execSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = join(import.meta.dirname, '../..');
 const CLI_PATH = join(REPO_ROOT, 'dist/cli/index.js');
@@ -140,6 +143,46 @@ describe('CLI smoke test (real process invocation)', () => {
       { effectiveFrom: '2026-08', amountMinor: 60000 },
       { effectiveFrom: '2026-09', amountMinor: 70000 },
     ]);
+  });
+
+  // Regression (issue #9): two real, separate `budget add` processes
+  // invoked against the same --file used to race -- both load the same
+  // starting JSON, and whichever process's save wins the rename last
+  // silently overwrites the other's transaction, losing it with no error.
+  // This spawns real child processes (not in-process calls) so the "two
+  // concurrent CLI invocations" scenario from the issue is exercised
+  // exactly as described, not just simulated within a single process.
+  it('two concurrent `add` invocations against the same --file both persist -- neither is silently dropped', async () => {
+    const N = 8;
+    const additions = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        execFileAsync('node', [
+          CLI_PATH,
+          '--file',
+          filePath,
+          'add',
+          String(i + 1),
+          'groceries',
+          '--kind',
+          'expense',
+          '--date',
+          '2026-08-01',
+        ]),
+      ),
+    );
+
+    for (const { stdout } of additions) {
+      expect(stdout).toContain('added');
+    }
+
+    const stored = JSON.parse(readFileSync(filePath, 'utf-8'));
+    // If the race were still present, some of the N concurrent writes would
+    // clobber each other and this would be < N.
+    expect(stored.transactions).toHaveLength(N);
+    const amounts = stored.transactions.map((t: { transaction: { amountMinor: number } }) => t.transaction.amountMinor);
+    expect(amounts.sort((a: number, b: number) => a - b)).toEqual(
+      Array.from({ length: N }, (_, i) => (i + 1) * 100),
+    );
   });
 
   it('exits 1 with a one-line stderr message on a handled validation error', () => {

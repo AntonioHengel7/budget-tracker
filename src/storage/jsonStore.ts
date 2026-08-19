@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createCategoryBudget } from '../domain/budget.js';
 import type { CategoryBudget } from '../domain/budget.js';
@@ -251,6 +251,144 @@ export async function saveStore(filePath: string, store: PersistedStore): Promis
     throw new StorageError(`failed to save store file "${filePath}": ${(err as Error).message}`, {
       cause: err,
     });
+  }
+}
+
+/**
+ * Max time a caller waits for a concurrent writer to finish before giving
+ * up. Chosen to comfortably exceed a single save's real duration (a small
+ * JSON write + rename) while still failing fast enough that a CLI user
+ * isn't left staring at a hung terminal.
+ */
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+
+/** How often to re-check whether a held lock has been released. */
+const LOCK_POLL_INTERVAL_MS = 20;
+
+/**
+ * A lock file older than this is treated as abandoned rather than held by a
+ * live writer. Node CLI invocations are short-lived (single load-modify-save
+ * cycle), so a lock surviving this long almost certainly means its owning
+ * process died before reaching its `finally` cleanup (e.g. SIGKILL, power
+ * loss) rather than that a save is still legitimately in progress. Without
+ * this, a single crashed invocation would wedge every future invocation
+ * against that file forever. The tradeoff -- a near-impossible false
+ * positive if a single save somehow takes 30s -- is strictly better than a
+ * permanent deadlock.
+ */
+const STALE_LOCK_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Acquires an exclusive lock on `filePath` by creating `${filePath}.lock`
+ * with the `wx` flag (O_CREAT | O_EXCL): the filesystem guarantees that
+ * create fails with EEXIST if the file already exists, and that guarantee
+ * holds across separate OS processes, not just separate calls within one
+ * process -- which is what makes this safe against two independent CLI
+ * invocations racing each other (issue #9), unlike an in-process mutex.
+ *
+ * While the lock is held elsewhere, this polls until it is released or
+ * `timeoutMs` elapses. On timeout it throws a StorageError rather than ever
+ * proceeding without the lock -- a loud, clear failure instead of silently
+ * racing the other writer and possibly losing its update. A lock file older
+ * than STALE_LOCK_MS is assumed to belong to a crashed holder and is stolen
+ * rather than waited out.
+ */
+async function acquireLock(filePath: string, timeoutMs: number): Promise<string> {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + timeoutMs;
+
+  // Mirrors saveStore's own mkdir: --file may point at a not-yet-created
+  // directory, and taking the lock must not narrow that existing behavior.
+  await mkdir(dirname(lockPath), { recursive: true });
+
+  for (;;) {
+    try {
+      const handle = await open(lockPath, 'wx', 0o600);
+      try {
+        // Best-effort breadcrumb for a human debugging a stuck lock; never
+        // relied on programmatically.
+        await handle.writeFile(`${process.pid}\n`, 'utf-8');
+      } finally {
+        await handle.close();
+      }
+      return lockPath;
+    } catch (err) {
+      if (!isErrnoException(err) || err.code !== 'EEXIST') {
+        throw new StorageError(
+          `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
+          { cause: err },
+        );
+      }
+    }
+
+    // lstat, not stat: the staleness decision is about the lock path
+    // itself -- including a dangling symlink dropped at that path -- not
+    // whatever a symlink there might point to.
+    try {
+      const lockStats = await lstat(lockPath);
+      if (Date.now() - lockStats.mtimeMs > STALE_LOCK_MS) {
+        await rm(lockPath, { force: true });
+      }
+    } catch (statErr) {
+      if (!isErrnoException(statErr) || statErr.code !== 'ENOENT') {
+        throw new StorageError(
+          `failed to inspect lock for store file "${filePath}": ${(statErr as Error).message}`,
+          { cause: statErr },
+        );
+      }
+      // else: the other writer released it between our attempts -- fall
+      // through to the deadline check/sleep below and retry.
+    }
+
+    if (Date.now() >= deadline) {
+      throw new StorageError(
+        `timed out after ${timeoutMs}ms waiting for a lock on store file "${filePath}" -- another process is writing to it, try again`,
+      );
+    }
+    await sleep(LOCK_POLL_INTERVAL_MS);
+  }
+}
+
+async function releaseLock(lockPath: string): Promise<void> {
+  await rm(lockPath, { force: true });
+}
+
+/**
+ * Runs one load-modify-save cycle against `filePath` under an exclusive
+ * lock, closing the lost-update race described in issue #9: previously
+ * every mutating CLI command called loadStore then saveStore as two
+ * independent steps, so two concurrent invocations could both load the same
+ * starting state and whichever saved last would silently overwrite the
+ * other's change. With the lock, a second invocation's `loadStore` cannot
+ * start until the first invocation has saved and released the lock, so it
+ * always observes the first invocation's write and layers its own update on
+ * top instead of clobbering it. If the lock is unavailable within
+ * `timeoutMs`, this throws (StorageError) instead of ever proceeding
+ * unlocked.
+ *
+ * `mutator` receives the freshly loaded store (taken under the lock, so it
+ * is never stale) and returns both the next store to persist and an
+ * arbitrary `result` for the caller -- this lets commands like `add`/`rm`/
+ * `limit set` return their own result shape (e.g. the new transaction's id)
+ * without a second, redundant read.
+ */
+export async function updateStore<T>(
+  filePath: string,
+  mutator: (store: PersistedStore) => { store: PersistedStore; result: T },
+  options: { timeoutMs?: number } = {},
+): Promise<T> {
+  const lockPath = await acquireLock(filePath, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
+  try {
+    const current = await loadStore(filePath);
+    const { store: next, result } = mutator(current);
+    await saveStore(filePath, next);
+    return result;
+  } finally {
+    await releaseLock(lockPath);
   }
 }
 

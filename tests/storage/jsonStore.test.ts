@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,8 +11,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 // Imported after the mock so jsonStore.ts picks up the mocked `writeFile`.
 import { writeFile } from 'node:fs/promises';
 import { ValidationError } from '../../src/domain/errors.js';
-import { loadStore, saveStore, StorageError } from '../../src/storage/jsonStore.js';
-import type { PersistedStore } from '../../src/storage/schema.js';
+import { loadStore, saveStore, StorageError, updateStore } from '../../src/storage/jsonStore.js';
+import type { PersistedStore, StoredTransaction } from '../../src/storage/schema.js';
 
 let dir: string;
 let filePath: string;
@@ -237,5 +237,123 @@ describe('jsonStore', () => {
 
     // The real path must never have been touched.
     expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
+// Regression (issue #9): every mutating CLI command used to do an
+// unlocked load-modify-save cycle, so two concurrent invocations against
+// the same file could both load the same starting state and whichever
+// saved last would silently overwrite the other's write. updateStore wraps
+// the cycle in an exclusive lock file so this can no longer happen -- either
+// the second invocation's load waits until the first has saved and released
+// the lock (serializing the two updates, no data lost), or, if the lock
+// can't be acquired in time, it fails loudly instead of racing unlocked.
+describe('updateStore (issue #9: concurrent-write race)', () => {
+  function appendMutator(stored: StoredTransaction) {
+    return (store: PersistedStore) => ({
+      store: { ...store, transactions: [...store.transactions, stored] },
+      result: stored,
+    });
+  }
+
+  const txA: StoredTransaction = {
+    id: 'tx-a',
+    transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: 100 },
+  };
+  const txB: StoredTransaction = {
+    id: 'tx-b',
+    transaction: { date: '2026-08-02', category: 'groceries', kind: 'expense', amountMinor: 200 },
+  };
+
+  it('two overlapping updateStore calls against the same file both persist -- neither write is silently lost', async () => {
+    // Both start "concurrently" (before either has acquired the lock);
+    // without the lock, both would load the same empty starting store and
+    // the second save would clobber the first, leaving only one transaction.
+    const [resultA, resultB] = await Promise.all([
+      updateStore(filePath, appendMutator(txA)),
+      updateStore(filePath, appendMutator(txB)),
+    ]);
+
+    expect([resultA, resultB]).toEqual(expect.arrayContaining([txA, txB]));
+
+    const final = await loadStore(filePath);
+    expect(final.transactions.map((t) => t.id).sort()).toEqual(['tx-a', 'tx-b']);
+  });
+
+  it('serializes many overlapping updateStore calls without dropping any of them', async () => {
+    const stored: StoredTransaction[] = Array.from({ length: 8 }, (_, i) => ({
+      id: `tx-${i}`,
+      transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: i + 1 },
+    }));
+
+    await Promise.all(stored.map((entry) => updateStore(filePath, appendMutator(entry))));
+
+    const final = await loadStore(filePath);
+    expect(final.transactions.map((t) => t.id).sort()).toEqual(stored.map((s) => s.id).sort());
+  });
+
+  it('fails loudly with a StorageError (instead of silently proceeding unlocked) when the lock cannot be acquired within timeoutMs', async () => {
+    // Simulate a concurrent holder by creating the lock file ourselves and
+    // never releasing it.
+    writeFileSync(`${filePath}.lock`, `${process.pid}\n`, { flag: 'wx' });
+
+    await expect(
+      updateStore(filePath, appendMutator(txA), { timeoutMs: 100 }),
+    ).rejects.toThrow(StorageError);
+    await expect(
+      updateStore(filePath, appendMutator(txA), { timeoutMs: 100 }),
+    ).rejects.toThrow(/timed out.*lock/i);
+
+    // The would-be write must never have been applied.
+    const final = await loadStore(filePath);
+    expect(final.transactions).toEqual([]);
+  });
+
+  it('treats a lock file far older than the stale threshold as abandoned and steals it, rather than waiting/failing forever', async () => {
+    const lockPath = `${filePath}.lock`;
+    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
+    // Back-date the lock well past the 30s staleness threshold so it reads
+    // as belonging to a crashed holder rather than a live writer.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+
+    const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 200 });
+    expect(result).toEqual(txA);
+
+    const final = await loadStore(filePath);
+    expect(final.transactions).toEqual([txA]);
+  });
+
+  it('honours timeoutMs (does not busy-loop forever) when the lock path is a dangling symlink', async () => {
+    // Regression (Hobbes, PR #50 round 1 BLOCKING): open(lockPath, 'wx')
+    // fails EEXIST on a symlink even when its target doesn't exist, but the
+    // old code inspected it with `stat` (which follows the link) and
+    // treated the resulting ENOENT as "released, retry immediately" --
+    // skipping both the deadline check and the sleep, forever. Any local
+    // user who can write to the store directory could wedge every writer
+    // at 100% CPU by dropping a dangling symlink at `<file>.lock`.
+    const lockPath = `${filePath}.lock`;
+    symlinkSync('/nonexistent-target', lockPath);
+
+    const start = Date.now();
+    await expect(
+      updateStore(filePath, appendMutator(txA), { timeoutMs: 200 }),
+    ).rejects.toThrow(/timed out.*lock/i);
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it('releases the lock even when the mutator throws, and does not persist a partial write', async () => {
+    await expect(
+      updateStore(filePath, () => {
+        throw new ValidationError('mutator refuses to proceed');
+      }),
+    ).rejects.toThrow(ValidationError);
+
+    expect(existsSync(`${filePath}.lock`)).toBe(false);
+
+    // A subsequent call must be able to acquire the lock immediately (not
+    // time out waiting on a lock the failed mutator forgot to release).
+    const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 200 });
+    expect(result).toEqual(txA);
   });
 });
