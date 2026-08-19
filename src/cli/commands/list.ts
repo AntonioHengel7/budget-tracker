@@ -34,7 +34,7 @@ function buildFilter(options: ListOptions): TransactionFilter {
     filter.to = parseIsoDate(options.to);
   }
   if (options.category !== undefined) {
-    filter.category = options.category;
+    filter.category = options.category.trim();
   }
   if (options.kind !== undefined) {
     if (!isTransactionKind(options.kind)) {

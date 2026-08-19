@@ -50,6 +50,18 @@ describe('listTransactions', () => {
     expect(results[0]?.transaction.date).toBe('2026-08-01');
   });
 
+  it('trims whitespace in --category, matching the write-path trimming', async () => {
+    await addTransaction(filePath, { amount: '10', category: 'groceries', kind: 'expense', date: '2026-08-01' });
+    await addTransaction(filePath, { amount: '5', category: 'dining', kind: 'expense', date: '2026-08-02' });
+
+    const trimmed = await listTransactions(filePath, { category: 'groceries' });
+    const untrimmed = await listTransactions(filePath, { category: '  groceries  ' });
+
+    expect(untrimmed).toEqual(trimmed);
+    expect(untrimmed).toHaveLength(1);
+    expect(untrimmed[0]?.transaction.category).toBe('groceries');
+  });
+
   it('rejects an invalid --from date', async () => {
     await expect(listTransactions(filePath, { from: 'not-a-date' })).rejects.toThrow(ValidationError);
   });
