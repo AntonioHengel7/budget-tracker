@@ -98,6 +98,24 @@ describe('CLI smoke test (real process invocation)', () => {
     expect(stored.transactions[0].transaction.date).toBe(today);
   });
 
+  // Regression (#12): an empty-string BUDGET_FILE ("$SOME_UNSET_VAR"
+  // expanding to "") must be treated the same as unset, not as a literal
+  // path -- it used to be handed straight to the store as `""` because
+  // `??` doesn't catch an empty string.
+  it('treats an empty BUDGET_FILE the same as unset, falling back to ./budget.json', () => {
+    const add = execFileSync('node', [CLI_PATH, 'add', '5', 'misc', '--kind', 'expense'], {
+      encoding: 'utf-8',
+      cwd: dir,
+      env: { ...process.env, BUDGET_FILE: '' },
+    });
+    expect(add).toContain('added');
+
+    // Falls back to the default `./budget.json` relative to cwd, not `""`.
+    const stored = JSON.parse(readFileSync(join(dir, 'budget.json'), 'utf-8'));
+    expect(stored.transactions).toHaveLength(1);
+    expect(stored.transactions[0].transaction.category).toBe('misc');
+  });
+
   // Regression (Socrates, PR #7 round 2 BLOCKING 1): the "limit set"
   // confirmation message used to print budget.limits[length - 1], assuming
   // a set always appends. Once setLimit started replacing an existing

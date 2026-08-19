@@ -17,10 +17,17 @@ program
   .version('0.1.0')
   .option('-f, --file <path>', 'path to the budget JSON store file');
 
-/** Resolves the store path: --file > BUDGET_FILE env var > ./budget.json. */
+/**
+ * Resolves the store path: --file > BUDGET_FILE env var > ./budget.json.
+ * An empty-string BUDGET_FILE (e.g. `BUDGET_FILE="$SOME_UNSET_VAR"`) is
+ * treated the same as unset, not as a literal path -- consistent with how
+ * STATIC_DIR="" is normalized in src/server/index.ts.
+ */
 function resolveFilePath(): string {
   const opts = program.opts<{ file?: string }>();
-  return opts.file ?? process.env.BUDGET_FILE ?? './budget.json';
+  const rawBudgetFile = process.env.BUDGET_FILE;
+  const budgetFile = rawBudgetFile === '' ? undefined : rawBudgetFile;
+  return opts.file ?? budgetFile ?? './budget.json';
 }
 
 /**
