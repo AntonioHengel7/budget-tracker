@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createTransaction } from '../../domain/transaction.js';
 import type { Transaction } from '../../domain/transaction.js';
 import { parseAmount } from '../../domain/money.js';
-import { loadStore, saveStore } from '../../storage/jsonStore.js';
+import { updateStore } from '../../storage/jsonStore.js';
 import type { StoredTransaction } from '../../storage/schema.js';
 
 export interface AddOptions {
@@ -29,9 +29,15 @@ export async function addTransaction(filePath: string, options: AddOptions): Pro
     ...(options.note !== undefined ? { note: options.note } : {}),
   });
 
-  const store = await loadStore(filePath);
-  const stored: StoredTransaction = { id: randomUUID(), transaction };
-  await saveStore(filePath, { ...store, transactions: [...store.transactions, stored] });
-
-  return { id: stored.id, transaction };
+  // Load-modify-save runs under updateStore's exclusive lock (issue #9) so a
+  // concurrent CLI invocation against the same file can't load this same
+  // stale state and have its own write silently clobbered by whichever
+  // invocation saves last.
+  return updateStore(filePath, (store) => {
+    const stored: StoredTransaction = { id: randomUUID(), transaction };
+    return {
+      store: { ...store, transactions: [...store.transactions, stored] },
+      result: { id: stored.id, transaction },
+    };
+  });
 }
