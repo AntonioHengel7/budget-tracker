@@ -165,6 +165,19 @@ describe('web API', () => {
     expect(res.body).toEqual({ error: 'malformed JSON request body' });
   });
 
+  it('rejects a request body exceeding the size limit with a 413, not a 500', async () => {
+    // express.json() defaults to a 100kb limit; send a valid-JSON body well
+    // past that so the only thing under test is the size check, not the parser.
+    const oversizedNote = 'x'.repeat(200 * 1024);
+    const res = await request(app)
+      .post('/api/login')
+      .set('content-type', 'application/json')
+      .send(JSON.stringify({ username: 'antonio', password: PASSWORD, note: oversizedNote }));
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'request body too large' });
+  });
+
   it('rate-limits repeated /api/login attempts from the same IP', async () => {
     const limitedApp = createApp({
       dataDir,
