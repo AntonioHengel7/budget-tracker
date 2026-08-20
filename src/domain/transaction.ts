@@ -11,6 +11,7 @@ export type TransactionKind = 'income' | 'expense';
 
 const TRANSACTION_KINDS: readonly TransactionKind[] = ['income', 'expense'];
 const MAX_NOTE_LENGTH = 200;
+const MAX_CATEGORY_LENGTH = 100;
 
 export interface Transaction {
   readonly date: IsoDate;
@@ -32,6 +33,27 @@ function isTransactionKind(value: string): value is TransactionKind {
   return (TRANSACTION_KINDS as readonly string[]).includes(value);
 }
 
+/**
+ * Trims and validates a category string, enforcing non-empty and a maximum
+ * length, returning the normalized value -- same shape as `parseIsoDate`,
+ * not the void-returning `assert*` guards elsewhere in this codebase (e.g.
+ * `assertSafeNonNegativeInteger`, `assertValidUsername`). Exported so
+ * budget.ts validates categories against the exact same bar as
+ * transaction.ts, instead of re-implementing a laxer check.
+ */
+export function parseCategory(category: string): string {
+  const trimmed = category.trim();
+  if (trimmed === '') {
+    throw new ValidationError('category must not be empty');
+  }
+  if (trimmed.length > MAX_CATEGORY_LENGTH) {
+    throw new ValidationError(
+      `category must be at most ${MAX_CATEGORY_LENGTH} characters, got ${trimmed.length}`,
+    );
+  }
+  return trimmed;
+}
+
 /** Validates and constructs a Transaction, enforcing all entity invariants. */
 export function createTransaction(input: TransactionInput): Transaction {
   assertSafeNonNegativeInteger(input.amountMinor, 'amountMinor');
@@ -41,10 +63,7 @@ export function createTransaction(input: TransactionInput): Transaction {
     );
   }
 
-  const category = input.category.trim();
-  if (category === '') {
-    throw new ValidationError('category must not be empty');
-  }
+  const category = parseCategory(input.category);
 
   if (!isTransactionKind(input.kind)) {
     throw new ValidationError(`kind must be "income" or "expense", got "${input.kind}"`);
