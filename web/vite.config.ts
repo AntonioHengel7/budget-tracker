@@ -25,7 +25,7 @@ export default defineConfig({
       reportsDirectory: 'coverage',
       reportOnFailure: true,
       // Floor set at the current measured baseline (statements/lines 57.51%,
-      // branches 48.19%, functions 50.87%), rounded down for headroom. This
+      // branches 46.98%, functions 50.87%), rounded down for headroom. This
       // is a regression gate, not an aspirational target — src/pages/
       // Transactions.tsx and Dashboard.tsx are largely untested today; raise
       // these thresholds as coverage for those improves.
