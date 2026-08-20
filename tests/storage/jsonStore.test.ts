@@ -165,6 +165,35 @@ describe('jsonStore', () => {
     await expect(loadStore(filePath)).rejects.toThrow(StorageError);
   });
 
+  // Regression (#8): `rm` looks up a transaction by id and removes it, but
+  // ids are only unique by convention (crypto.randomUUID() at creation
+  // time) -- nothing enforced that at load time. A hand-edited store file
+  // with two transactions sharing an id used to load "successfully" and
+  // leave `rm`'s id lookup with undefined behavior. loadStore must reject
+  // the duplicate outright instead.
+  it('rejects a store file with two transactions sharing the same id as StorageError', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        transactions: [
+          {
+            id: 'dup',
+            transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: 500 },
+          },
+          {
+            id: 'dup',
+            transaction: { date: '2026-08-02', category: 'salary', kind: 'income', amountMinor: 1000 },
+          },
+        ],
+        budgets: [],
+      }),
+    );
+    await expect(loadStore(filePath)).rejects.toThrow(StorageError);
+    await expect(loadStore(filePath)).rejects.toThrow(/more than one transaction with id/);
+  });
+
   // Regression (#15): CategoryBudget is designed as "one budget per
   // category", but nothing enforced that at load time. A hand-edited (or
   // otherwise produced) store file with two entries sharing a category used
