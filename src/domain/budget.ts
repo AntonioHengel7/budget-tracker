@@ -3,6 +3,7 @@ import { ValidationError } from './errors.js';
 import { addMinor, assertSafeNonNegativeInteger, subMinor, sumMinor } from './money.js';
 import type { Period } from './period.js';
 import { comparePeriod, nextPeriod, parsePeriod } from './period.js';
+import { parseCategory } from './transaction.js';
 import type { Transaction } from './transaction.js';
 
 /** A single limit amount, effective from a given period onward until superseded. */
@@ -41,10 +42,7 @@ export interface CategoryBudgetInput {
 
 /** Validates and constructs a CategoryBudget, enforcing all entity invariants. */
 export function createCategoryBudget(input: CategoryBudgetInput): CategoryBudget {
-  const category = input.category.trim();
-  if (category === '') {
-    throw new ValidationError('category must not be empty');
-  }
+  const category = parseCategory(input.category);
 
   return {
     category,
