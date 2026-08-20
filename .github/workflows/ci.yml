@@ -11,6 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Guard against dead eslint-disable comments
+        run: |
+          HITS=$(grep -rIn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude='*.md' --exclude=ci.yml -e 'eslint-disable' . || true)
+          if [ -n "$HITS" ] && ! grep -q '"eslint"' package.json web/package.json; then
+            echo "Found eslint-disable comment(s) but no eslint dependency in package.json or web/package.json:"
+            echo "$HITS"
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
