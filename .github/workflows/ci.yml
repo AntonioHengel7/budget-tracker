@@ -53,10 +53,19 @@ jobs:
             budget-tracker:ci)
 
           cleanup() {
+            # Capture the exit status we were called with -- entrypoint.sh
+            # chowns the bind-mounted dir to the in-container `node` user,
+            # which the CI runner's own user doesn't own on a sticky-bit
+            # tmp filesystem, so a plain `rm -rf` below fails with
+            # "Operation not permitted". Without saving/restoring $?, that
+            # failure (combined with `set -e` inside this EXIT trap) would
+            # silently turn a passing healthz check into a failed job.
+            local status=$?
             echo "--- container logs ---"
             docker logs "$CONTAINER_ID" 2>&1 || true
             docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
-            rm -rf "$DATA_DIR_HOST"
+            sudo rm -rf "$DATA_DIR_HOST" 2>/dev/null || rm -rf "$DATA_DIR_HOST" 2>/dev/null || true
+            exit "$status"
           }
           trap cleanup EXIT
 
