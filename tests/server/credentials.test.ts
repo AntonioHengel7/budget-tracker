@@ -36,6 +36,10 @@ describe('loadCredentials', () => {
     expect(() => loadCredentials('{"username":"a"}')).toThrow(CredentialsConfigError);
   });
 
+  it('throws when the array is empty (zero configured accounts)', () => {
+    expect(() => loadCredentials('[]')).toThrow(CredentialsConfigError);
+  });
+
   it('throws when an entry is missing username or passwordHash', () => {
     expect(() => loadCredentials(JSON.stringify([{ username: 'a' }]))).toThrow(CredentialsConfigError);
   });
