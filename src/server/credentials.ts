@@ -49,7 +49,10 @@ function isCredential(value: unknown): value is Credential {
 /**
  * Parses the raw `AUTH_USERS_JSON` env var value into a list of credentials.
  * Throws `CredentialsConfigError` for anything malformed -- missing env var,
- * invalid JSON, non-array JSON, entries missing required fields, an entry
+ * invalid JSON, non-array JSON, an empty array (a server with zero
+ * configured logins can never be used, so failing fast at boot is
+ * preferable to a silently-unusable deployment), entries missing required
+ * fields, an entry
  * whose username doesn't match the canonical username shape (enforced here,
  * at config-load time, so an invalid username -- e.g. one containing the
  * `.` that `session.ts` uses as a token delimiter -- can never reach
@@ -81,6 +84,10 @@ export function loadCredentials(raw: string | undefined): Credential[] {
 
   if (!Array.isArray(parsed)) {
     throw new CredentialsConfigError('AUTH_USERS_JSON must be a JSON array');
+  }
+
+  if (parsed.length === 0) {
+    throw new CredentialsConfigError('AUTH_USERS_JSON must configure at least one account');
   }
 
   const seenUsernames = new Set<string>();
