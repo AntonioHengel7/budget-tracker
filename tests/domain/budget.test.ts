@@ -77,6 +77,18 @@ describe('createCategoryBudget', () => {
     );
   });
 
+  it('rejects a category over 100 characters', () => {
+    expect(() =>
+      createCategoryBudget({ category: 'a'.repeat(101), rollover: true, limits: [] }),
+    ).toThrow(ValidationError);
+  });
+
+  it('accepts a category of exactly 100 characters', () => {
+    const category = 'a'.repeat(100);
+    const budget = createCategoryBudget({ category, rollover: true, limits: [] });
+    expect(budget.category).toBe(category);
+  });
+
   // Regression (Hobbes, PR #4 BLOCKING 3a): a NaN limit nested inside a
   // budget's limit history must be rejected the same way a top-level one is.
   it('rejects a NaN amountMinor on any of its limits', () => {
