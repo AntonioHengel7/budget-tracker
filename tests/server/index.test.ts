@@ -120,11 +120,14 @@ describe('boot', () => {
   it('treats an empty DATA_DIR the same as unset, resolving to the default data directory', async () => {
     // The default DATA_DIR ('data') is relative to process.cwd(), same as
     // entrypoint.sh's `${DATA_DIR:-/data}` fallback resolving relative to
-    // the container's working directory. Clean up before and after so this
-    // never leaks into other tests or the repo tree (the dir is gitignored,
-    // but a leftover directory could still shadow a later test's default).
-    const defaultDataDir = join(process.cwd(), 'data');
-    await rm(defaultDataDir, { recursive: true, force: true });
+    // the container's working directory. Chdir into a throwaway tmpdir for
+    // the duration of the test (restored in finally) rather than touching
+    // process.cwd()'s own 'data' dir directly -- that's the real, gitignored
+    // local dev data directory, and rm -rf'ing it here would destroy a
+    // developer's actual transactions just from running `npm test`.
+    const originalCwd = process.cwd();
+    const tmpCwd = await mkdtemp(join(tmpdir(), 'data-dir-empty-test-'));
+    process.chdir(tmpCwd);
 
     try {
       const passwordHash = await bcrypt.hash(REAL_PASSWORD, 10); // AUTH_USERS_JSON requires bcrypt cost 10
@@ -138,7 +141,8 @@ describe('boot', () => {
 
       const { app } = boot();
       const agent = request.agent(app);
-      await agent.post('/api/login').send({ username: 'antonio', password: REAL_PASSWORD });
+      const login = await agent.post('/api/login').send({ username: 'antonio', password: REAL_PASSWORD });
+      expect(login.status).toBe(200);
       const add = await agent.post('/api/transactions').send({
         amount: '10',
         category: 'test',
@@ -147,11 +151,12 @@ describe('boot', () => {
       });
       expect(add.status).toBe(201);
 
-      // Proves DATA_DIR='' resolved to the same default location as unset,
-      // not to some other (e.g. cwd-root or invalid) path.
-      await expect(access(join(defaultDataDir, 'antonio.json'))).resolves.toBeUndefined();
+      // Proves DATA_DIR='' resolved to the same default location as unset
+      // (tmpCwd/data), not to some other (e.g. cwd-root or invalid) path.
+      await expect(access(join(tmpCwd, 'data', 'antonio.json'))).resolves.toBeUndefined();
     } finally {
-      await rm(defaultDataDir, { recursive: true, force: true });
+      process.chdir(originalCwd);
+      await rm(tmpCwd, { recursive: true, force: true });
     }
   });
 });
