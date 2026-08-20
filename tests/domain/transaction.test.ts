@@ -43,6 +43,25 @@ describe('createTransaction', () => {
     expect(() => createTransaction({ ...validInput, category: '   ' })).toThrow(ValidationError);
   });
 
+  it('rejects a category over 100 characters', () => {
+    const category = 'a'.repeat(101);
+    expect(() => createTransaction({ ...validInput, category })).toThrow(/at most 100/);
+  });
+
+  it('accepts a category of exactly 100 characters', () => {
+    const category = 'a'.repeat(100);
+    const tx = createTransaction({ ...validInput, category });
+    expect(tx.category).toBe(category);
+  });
+
+  // Trimming happens before the length check, so surrounding whitespace
+  // doesn't count against the limit.
+  it('accepts a category that is exactly 100 characters after trimming', () => {
+    const category = `  ${'a'.repeat(100)}  `;
+    const tx = createTransaction({ ...validInput, category });
+    expect(tx.category).toBe('a'.repeat(100));
+  });
+
   it('rejects an unknown kind', () => {
     expect(() => createTransaction({ ...validInput, kind: 'transfer' })).toThrow(ValidationError);
   });
