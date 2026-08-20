@@ -48,4 +48,21 @@ describe('getStatus', () => {
   it('rejects an invalid period', async () => {
     await expect(getStatus(filePath, { period: 'not-a-period' })).rejects.toThrow(ValidationError);
   });
+
+  it('lists categories alphabetically regardless of underlying budget array order (#14)', async () => {
+    // Set 'zebra' first, then 'apple' -- store.budgets ends up in insertion
+    // order [zebra, apple], which is already non-alphabetical. Correcting
+    // apple's limit goes through limit.ts's filter+rebuild (otherBudgets),
+    // which re-appends apple at the end of the array -- leaving it
+    // [zebra, apple] still, i.e. reverse-alphabetical. Without a stable
+    // sort, getStatus would surface that incidental order verbatim.
+    await setLimit(filePath, { category: 'zebra', amount: '50', effectiveFrom: '2026-08' });
+    await setLimit(filePath, { category: 'apple', amount: '75', effectiveFrom: '2026-08' });
+    // Correction: re-set apple's limit for the same effectiveFrom period.
+    await setLimit(filePath, { category: 'apple', amount: '80', effectiveFrom: '2026-08' });
+
+    const results = await getStatus(filePath, { period: '2026-08' });
+
+    expect(results.map((s) => s.category)).toEqual(['apple', 'zebra']);
+  });
 });
