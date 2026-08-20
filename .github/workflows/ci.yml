@@ -31,6 +31,61 @@ jobs:
       - run: bash .claude/hooks/lib/coverage-gate.sh --mode bar --core-threshold 95
       - run: docker build -t budget-tracker:ci .
 
+      - name: Run built image and verify /healthz
+        run: |
+          set -e
+
+          # Throwaway, CI-only credentials -- not used anywhere real. The
+          # hash is a genuine bcrypt hash (at the pinned BCRYPT_COST=10) of a
+          # password that only ever exists in this line, so loadCredentials'
+          # shape/cost validation passes and the server can actually boot.
+          SESSION_SECRET="ci-only-throwaway-session-secret-not-a-real-secret"
+          AUTH_USERS_JSON='[{"username":"ciuser","passwordHash":"$2a$10$YYcfaFJ18Lfjv.O4KF2YQucz3Gm2v8e5K/zqawcOc9ZVVGz82Cn96"}]'
+
+          # Bind-mounted temp dir standing in for the Fly volume at /data.
+          DATA_DIR_HOST=$(mktemp -d)
+          CONTAINER_ID=$(docker run -d \
+            -p 8080:8080 \
+            -e SESSION_SECRET="$SESSION_SECRET" \
+            -e AUTH_USERS_JSON="$AUTH_USERS_JSON" \
+            -e TRUST_PROXY=1 \
+            -v "$DATA_DIR_HOST:/data" \
+            budget-tracker:ci)
+
+          cleanup() {
+            # Capture the exit status we were called with -- entrypoint.sh
+            # chowns the bind-mounted dir to the in-container `node` user,
+            # which the CI runner's own user doesn't own on a sticky-bit
+            # tmp filesystem, so a plain `rm -rf` below fails with
+            # "Operation not permitted". Without saving/restoring $?, that
+            # failure (combined with `set -e` inside this EXIT trap) would
+            # silently turn a passing healthz check into a failed job.
+            local status=$?
+            echo "--- container logs ---"
+            docker logs "$CONTAINER_ID" 2>&1 || true
+            docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+            sudo rm -rf "$DATA_DIR_HOST" 2>/dev/null || rm -rf "$DATA_DIR_HOST" 2>/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          echo "Waiting for /healthz to return 200..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Healthz OK (attempt $i)"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_ID" 2>/dev/null)" != "true" ]; then
+              echo "Container exited before /healthz returned 200"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Timed out waiting for /healthz to return 200"
+          exit 1
+
   web:
     runs-on: ubuntu-latest
     steps:
