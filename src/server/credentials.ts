@@ -53,10 +53,18 @@ function isCredential(value: unknown): value is Credential {
  * whose username doesn't match the canonical username shape (enforced here,
  * at config-load time, so an invalid username -- e.g. one containing the
  * `.` that `session.ts` uses as a token delimiter -- can never reach
- * `session.ts` or get signed into a token in the first place), or an entry
+ * `session.ts` or get signed into a token in the first place), an entry
  * whose `passwordHash` isn't a well-formed bcrypt hash at the pinned cost
  * factor (`BCRYPT_COST`) -- required for `authenticate`'s constant-time
- * guarantee to actually hold. This is a single documented error type: a
+ * guarantee to actually hold -- or two entries whose usernames are equal
+ * under case-folding (e.g. "Antonio" and "antonio"). The case-fold check
+ * also catches exact-duplicate usernames, since a string always folds
+ * equal to itself. Rejecting case-fold collisions at load time matters
+ * because `paths.ts` derives each user's per-user store filename from
+ * their username: on a case-sensitive filesystem (e.g. Fly's production
+ * Linux/ext4 volume) two such users would get distinct files, but on a
+ * case-insensitive filesystem (e.g. macOS/APFS, used in local dev) they'd
+ * silently share one file. This is a single documented error type: a
  * caller only ever needs to catch `CredentialsConfigError`.
  */
 export function loadCredentials(raw: string | undefined): Credential[] {
@@ -75,6 +83,8 @@ export function loadCredentials(raw: string | undefined): Credential[] {
     throw new CredentialsConfigError('AUTH_USERS_JSON must be a JSON array');
   }
 
+  const seenUsernames = new Set<string>();
+
   for (const entry of parsed) {
     if (!isCredential(entry)) {
       throw new CredentialsConfigError(
@@ -90,6 +100,14 @@ export function loadCredentials(raw: string | undefined): Credential[] {
       }
       throw err;
     }
+
+    const foldedUsername = entry.username.toLowerCase();
+    if (seenUsernames.has(foldedUsername)) {
+      throw new CredentialsConfigError(
+        `AUTH_USERS_JSON has duplicate usernames (case-insensitive): "${entry.username}"`,
+      );
+    }
+    seenUsernames.add(foldedUsername);
 
     const shape = parseBcryptHash(entry.passwordHash);
     if (!shape) {
