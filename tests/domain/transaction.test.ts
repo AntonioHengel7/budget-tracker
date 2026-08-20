@@ -45,7 +45,7 @@ describe('createTransaction', () => {
 
   it('rejects a category over 100 characters', () => {
     const category = 'a'.repeat(101);
-    expect(() => createTransaction({ ...validInput, category })).toThrow(ValidationError);
+    expect(() => createTransaction({ ...validInput, category })).toThrow(/at most 100/);
   });
 
   it('accepts a category of exactly 100 characters', () => {

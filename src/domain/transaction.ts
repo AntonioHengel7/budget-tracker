@@ -35,10 +35,13 @@ function isTransactionKind(value: string): value is TransactionKind {
 
 /**
  * Trims and validates a category string, enforcing non-empty and a maximum
- * length. Exported so budget.ts validates categories against the exact same
- * bar as transaction.ts, instead of re-implementing a laxer check.
+ * length, returning the normalized value -- same shape as `parseIsoDate`,
+ * not the void-returning `assert*` guards elsewhere in this codebase (e.g.
+ * `assertSafeNonNegativeInteger`, `assertValidUsername`). Exported so
+ * budget.ts validates categories against the exact same bar as
+ * transaction.ts, instead of re-implementing a laxer check.
  */
-export function assertValidCategory(category: string): string {
+export function parseCategory(category: string): string {
   const trimmed = category.trim();
   if (trimmed === '') {
     throw new ValidationError('category must not be empty');
@@ -60,7 +63,7 @@ export function createTransaction(input: TransactionInput): Transaction {
     );
   }
 
-  const category = assertValidCategory(input.category);
+  const category = parseCategory(input.category);
 
   if (!isTransactionKind(input.kind)) {
     throw new ValidationError(`kind must be "income" or "expense", got "${input.kind}"`);
