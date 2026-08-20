@@ -83,7 +83,13 @@ export function boot(): Booted {
     throw err;
   }
 
-  const dataDir = readEnv('DATA_DIR') ?? DEFAULT_DATA_DIR;
+  // An explicitly empty DATA_DIR is treated the same as unset -- mirrors
+  // both entrypoint.sh's `${DATA_DIR:-/data}` shell fallback (which also
+  // treats "" as unset) and STATIC_DIR's "" handling below, so the app never
+  // silently resolves an empty DATA_DIR to something other than the
+  // container's actual data directory (see #37).
+  const rawDataDir = readEnv('DATA_DIR');
+  const dataDir = rawDataDir === undefined || rawDataDir === '' ? DEFAULT_DATA_DIR : rawDataDir;
   const port = parsePort(readEnv('PORT'));
   const trustProxy = parseTrustProxy(readEnv('TRUST_PROXY'));
   const insecureCookies = readEnv('INSECURE_COOKIES') === 'true';
