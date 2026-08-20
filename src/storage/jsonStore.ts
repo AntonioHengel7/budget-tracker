@@ -165,6 +165,34 @@ function assertNoDuplicateCategories(budgets: readonly CategoryBudget[], filePat
 }
 
 /**
+ * `rm` looks up a transaction by `id` and removes it, but ids are only
+ * unique by convention (`crypto.randomUUID()` at creation time) -- nothing
+ * upstream of this module enforces that at load time. Nothing in the CLI can
+ * produce a duplicate through normal use, but a hand-edited or otherwise
+ * corrupted store file is not bound by that -- two entries sharing an id can
+ * slip in directly. Without this check, `rm`'s id lookup would have
+ * undefined behavior on such a file (e.g. removing only the first match, or
+ * both, depending on implementation details never meant to be relied upon).
+ * Reject it here, the same way every other malformed/inconsistent persisted
+ * state is rejected on load, instead of letting it corrupt silently
+ * downstream.
+ */
+function assertNoDuplicateTransactionIds(
+  transactions: readonly StoredTransaction[],
+  filePath: string,
+): void {
+  const seen = new Set<string>();
+  for (const { id } of transactions) {
+    if (seen.has(id)) {
+      throw new StorageError(
+        `store file "${filePath}" has more than one transaction with id "${id}" -- each transaction id must be unique`,
+      );
+    }
+    seen.add(id);
+  }
+}
+
+/**
  * Loads the store at `filePath`. A missing file returns a fresh empty store
  * (not an error). Every persisted transaction and budget is re-validated
  * through the domain's own constructors before being returned, so a
@@ -209,6 +237,7 @@ export async function loadStore(filePath: string): Promise<PersistedStore> {
   const transactions = (rawTransactions ?? []).map((entry: unknown) =>
     validateStoredTransaction(entry, filePath),
   );
+  assertNoDuplicateTransactionIds(transactions, filePath);
 
   const rawBudgets = parsed.budgets;
   if (rawBudgets !== undefined && !Array.isArray(rawBudgets)) {
