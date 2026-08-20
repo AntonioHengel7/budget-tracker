@@ -55,6 +55,22 @@ describe('loadCredentials', () => {
     const json = JSON.stringify([{ username: 'antonio', passwordHash: wrongCostHash }]);
     expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
   });
+
+  it('throws CredentialsConfigError when two usernames differ only in case', () => {
+    const json = JSON.stringify([
+      { username: 'Antonio', passwordHash: VALID_HASH },
+      { username: 'antonio', passwordHash: VALID_HASH },
+    ]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
+  });
+
+  it('throws CredentialsConfigError when two usernames are exact duplicates', () => {
+    const json = JSON.stringify([
+      { username: 'antonio', passwordHash: VALID_HASH },
+      { username: 'antonio', passwordHash: VALID_HASH },
+    ]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
+  });
 });
 
 describe('findCredential', () => {
