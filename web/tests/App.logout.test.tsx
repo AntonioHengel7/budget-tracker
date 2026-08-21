@@ -54,7 +54,7 @@ describe('App logout', () => {
     expect(unhandledRejections).toEqual([]);
   });
 
-  // Regression (Socrates, PR #75 round 1 NOTE): nothing pinned the theme
+  // Regression (Socrates, PR #75 round 1 NOTE (1)): nothing pinned the theme
   // toggle's location inside the authenticated nav row -- the entire point
   // of moving it out of the pre-auth-only corner placement.
   it('renders the theme toggle inside nav once logged in', async () => {

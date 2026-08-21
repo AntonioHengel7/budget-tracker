@@ -141,6 +141,9 @@ label {
   font-size: 0.9rem;
 }
 
+/* flow-root establishes a block-formatting context so .login-page's own
+   margin doesn't collapse through this wrapper and pull the toggle down
+   into the login card. */
 .pre-auth-shell {
   display: flow-root;
   position: relative;
