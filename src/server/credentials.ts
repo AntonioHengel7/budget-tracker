@@ -59,8 +59,14 @@ function isCredential(value: unknown): value is Credential {
  * `session.ts` or get signed into a token in the first place), an entry
  * whose `passwordHash` isn't a well-formed bcrypt hash at the pinned cost
  * factor (`BCRYPT_COST`) -- required for `authenticate`'s constant-time
- * guarantee to actually hold -- or two entries whose usernames are equal
- * under case-folding (e.g. "Antonio" and "antonio"). The case-fold check
+ * guarantee to actually hold -- an entry whose username starts with the
+ * reserved `demo-` prefix (that namespace belongs to the demo-account
+ * system's own runtime-generated usernames, see `generateDemoUsername` in
+ * `app.ts`, and admitting a configured user into it would let a real
+ * account collide with -- or be mistaken for, by the sweep's
+ * `DEMO_FILENAME_PATTERN` match -- a demo account), or two entries whose
+ * usernames are equal under case-folding (e.g. "Antonio" and "antonio").
+ * The case-fold check
  * also catches exact-duplicate usernames, since a string always folds
  * equal to itself. Rejecting case-fold collisions at load time matters
  * because `paths.ts` derives each user's per-user store filename from

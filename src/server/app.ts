@@ -108,7 +108,7 @@ const DEFAULT_API_RATE_LIMIT: RateLimitConfig = {
  * generous for a human trying the product out, while meaningfully slowing
  * a single scripted caller. On its own this does not bound total disk
  * usage -- a caller spread across many source IPs isn't slowed by a
- * per-IP limit at all -- that's what `DEFAULT_MAX_DEMO_ACCOUNTS` below is
+ * per-IP limit at all -- that's what `DEFAULT_DEMO_ACCOUNT_CAP` below is
  * for.
  */
 const DEFAULT_DEMO_RATE_LIMIT: RateLimitConfig = {
@@ -129,7 +129,7 @@ const DEMO_FILENAME_PATTERN = /^demo-[0-9a-f]{8}\.json$/;
  * of spike this feature exists for) while keeping worst-case disk usage to
  * a couple hundred small seeded store files.
  */
-const DEFAULT_MAX_DEMO_ACCOUNTS = 200;
+const DEFAULT_DEMO_ACCOUNT_CAP = 200;
 /** Max attempts to generate a demo username before giving up (see `/api/demo` below). */
 const MAX_DEMO_USERNAME_ATTEMPTS = 5;
 
@@ -215,7 +215,7 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 /**
  * Best-effort deletion of expired demo account store files, and returns how
  * many demo account files remain afterward (the caller uses this to enforce
- * `DEFAULT_MAX_DEMO_ACCOUNTS`). Runs on every `/api/demo` call, before a new
+ * `DEFAULT_DEMO_ACCOUNT_CAP`). Runs on every `/api/demo` call, before a new
  * demo account is issued, so demo accounts self-clean without needing a
  * separate cron/scheduler process. Never throws -- a sweep failure (e.g. a
  * transient permission error, or `dataDir` not existing yet) must never
@@ -450,7 +450,7 @@ export function createApp(config: AppConfig): Express {
       config.demoAccountTtlMs ?? DEFAULT_DEMO_ACCOUNT_TTL_MS,
     );
 
-    const cap = config.demoAccountCap ?? DEFAULT_MAX_DEMO_ACCOUNTS;
+    const cap = config.demoAccountCap ?? DEFAULT_DEMO_ACCOUNT_CAP;
     if (survivingCount >= cap) {
       res.status(503).json({ error: 'demo accounts are temporarily unavailable, try again later' });
       return;
