@@ -1,9 +1,21 @@
+:root {
+  --color-text: #1a1a1a;
+  --color-text-muted: #666666;
+  --color-border: #dddddd;
+  --color-surface: #f6f6f6;
+  --color-accent: #1a4d7a;
+  --color-accent-hover: #123a5c;
+  --color-error: #b00020;
+  --color-warning: #a06a00;
+  --color-success: #1a7a1a;
+}
+
 body {
   font-family: system-ui, -apple-system, sans-serif;
   max-width: 720px;
   margin: 2rem auto;
   padding: 0 1rem;
-  color: #1a1a1a;
+  color: var(--color-text);
 }
 
 h1,
@@ -15,15 +27,41 @@ nav {
   display: flex;
   gap: 0.5rem;
   margin-bottom: 1.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
 }
 
-nav button {
-  padding: 0.4rem 0.8rem;
+button {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  background: var(--color-accent);
+  color: #ffffff;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--color-accent-hover);
+}
+
+nav button,
+.demo-button {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+nav button:hover,
+.demo-button:hover {
+  background: var(--color-surface);
 }
 
 nav button[aria-current='true'] {
-  font-weight: bold;
-  text-decoration: underline;
+  border-bottom: 2px solid var(--color-accent);
+  color: var(--color-accent);
+  text-decoration: none;
+  font-weight: 600;
 }
 
 form {
@@ -41,6 +79,32 @@ label {
   font-size: 0.9rem;
 }
 
+.login-page {
+  box-sizing: border-box;
+  max-width: 360px;
+  margin: 4rem auto;
+  padding: 2rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -50,21 +114,25 @@ th,
 td {
   text-align: left;
   padding: 0.3rem 0.5rem;
-  border-bottom: 1px solid #ddd;
+  border-bottom: 1px solid var(--color-border);
+}
+
+tbody tr:nth-child(even) {
+  background: var(--color-surface);
 }
 
 [role='alert'] {
-  color: #b00020;
+  color: var(--color-error);
 }
 
 .status-over {
-  color: #b00020;
+  color: var(--color-error);
 }
 
 .status-at {
-  color: #a06a00;
+  color: var(--color-warning);
 }
 
 .status-under {
-  color: #1a7a1a;
+  color: var(--color-success);
 }
