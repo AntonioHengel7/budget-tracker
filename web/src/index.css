@@ -12,6 +12,10 @@
   --color-success: #2f6b4f;
 }
 
+/* Dark values are duplicated between this media-query block and the
+   :root[data-theme='dark'] block below -- a media-query selector and an
+   attribute selector can't share one rule body in plain CSS. Keep the two
+   sets of values in sync when editing either one. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --color-bg: #1a1815;
@@ -28,6 +32,7 @@
   }
 }
 
+/* Kept in sync with the @media (prefers-color-scheme: dark) block above. */
 :root[data-theme='dark'] {
   --color-bg: #1a1815;
   --color-surface: #232019;
@@ -69,7 +74,7 @@ button {
   border: 1px solid var(--color-accent);
   border-radius: 4px;
   background: var(--color-accent);
-  color: var(--color-btn-text, #fff);
+  color: var(--color-btn-text);
   font-size: 0.9rem;
   cursor: pointer;
 }

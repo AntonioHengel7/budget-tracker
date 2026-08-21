@@ -16,7 +16,17 @@ export function ThemeToggle(): React.JSX.Element {
   function handleClick(): void {
     const next: Theme = theme === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('theme', next);
+    // Persisting to localStorage is best-effort -- a storage failure
+    // (blocked storage, private/incognito mode, quota exceeded, a
+    // sandboxed iframe) must never prevent the DOM attribute and React
+    // state from staying in sync with each other. Those two are the
+    // source of truth for "what theme is currently showing"; the
+    // localStorage write is just a nice-to-have persistence step.
+    try {
+      localStorage.setItem('theme', next);
+    } catch {
+      // ignore -- theme still applies for this session, just won't persist
+    }
     setTheme(next);
   }
 
