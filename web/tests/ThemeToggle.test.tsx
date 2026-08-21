@@ -75,8 +75,8 @@ describe('ThemeToggle', () => {
     expect(screen.getByRole('button', { name: /switch to light theme/i })).toBeInTheDocument();
   });
 
-  // Regression (Socrates, PR #74 — localStorage.setItem failure must not
-  // desync DOM attribute from React state): localStorage.setItem sat
+  // Regression (Socrates, PR #74 round 1 BLOCKING (1)): localStorage.setItem
+  // failure must not desync DOM attribute from React state -- setItem sat
   // between the document.documentElement.setAttribute call and the
   // setTheme call. If it threw (blocked storage, private/incognito mode,
   // quota exceeded, a sandboxed iframe), the DOM already flipped to the
