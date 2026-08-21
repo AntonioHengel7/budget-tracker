@@ -59,7 +59,7 @@ function isCredential(value: unknown): value is Credential {
  * `session.ts` or get signed into a token in the first place), an entry
  * whose `passwordHash` isn't a well-formed bcrypt hash at the pinned cost
  * factor (`BCRYPT_COST`) -- required for `authenticate`'s constant-time
- * guarantee to actually hold --, an entry whose username starts with the
+ * guarantee to actually hold, an entry whose username starts with the
  * reserved `demo-` prefix (that namespace belongs to the demo-account
  * system's own runtime-generated usernames, see `generateDemoUsername` in
  * `app.ts`, and admitting a configured user into it would let a real
