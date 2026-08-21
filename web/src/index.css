@@ -60,8 +60,22 @@ body {
 }
 
 h1,
-h2 {
+h2,
+h3 {
   margin-top: 0;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+}
+
+h3 {
+  font-size: 1rem;
 }
 
 nav {
@@ -141,6 +155,17 @@ label {
   font-size: 0.9rem;
 }
 
+/* Checkbox labels are inline (checkbox, then text) rather than the
+   stacked text-input-label layout above -- without this override the
+   generic `label` rule's flex-direction: column plus the default
+   align-items: stretch stretches the checkbox itself to the label's
+   full width and inflates its focus ring to match. */
+.checkbox-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 /* flow-root establishes a block-formatting context so .login-page's own
    margin doesn't collapse through this wrapper and pull the toggle down
    into the login card. */
@@ -194,6 +219,11 @@ td {
   border-bottom: 1px solid var(--color-border);
 }
 
+td.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 tbody tr:nth-child(even) {
   background: var(--color-surface);
 }
@@ -202,14 +232,90 @@ tbody tr:nth-child(even) {
   color: var(--color-error);
 }
 
+/* Stacks a page's panels (summary, table, form, ...) with consistent
+   vertical spacing instead of ad hoc margins on each section. */
+.panel-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Reuses the .login-page radius/padding scale (8px radius) so surfaced
+   sections read as one consistent card language across the app. */
+.panel {
+  box-sizing: border-box;
+  padding: 1.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.panel form {
+  margin-bottom: 0;
+}
+
+.stat-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.stat-tile {
+  flex: 1 1 120px;
+  box-sizing: border-box;
+  padding: 0.75rem 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.stat-tile-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.stat-tile-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.stat-tile-value--success {
+  color: var(--color-success);
+}
+
+.stat-tile-value--error {
+  color: var(--color-error);
+}
+
+/* Low-opacity tint of the status color as background, full-strength
+   status color as text -- a pill/chip instead of plain colored text. */
+.status-over,
+.status-at,
+.status-under {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
 .status-over {
   color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 15%, transparent);
 }
 
 .status-at {
   color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 15%, transparent);
 }
 
 .status-under {
   color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 15%, transparent);
 }

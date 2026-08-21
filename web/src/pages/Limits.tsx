@@ -81,7 +81,7 @@ export function Limits(): React.JSX.Element {
           required
         />
 
-        <label htmlFor="limit-rollover">
+        <label htmlFor="limit-rollover" className="checkbox-label">
           <input
             id="limit-rollover"
             type="checkbox"

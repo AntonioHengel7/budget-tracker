@@ -62,89 +62,112 @@ export function Dashboard(): React.JSX.Element {
       <h2>Dashboard</h2>
       {loadError !== null ? <div role="alert">{loadError}</div> : null}
 
-      {summary !== null ? (
-        <section>
-          <h3>Summary ({summary.period.period})</h3>
-          <p>Income: {formatMinor(summary.period.incomeMinor)}</p>
-          <p>Expense: {formatMinor(summary.period.expenseMinor)}</p>
-          <p>Net: {formatMinor(summary.period.netMinor)}</p>
-        </section>
-      ) : null}
+      <div className="panel-stack">
+        {summary !== null ? (
+          <section className="panel">
+            <h3>Summary ({summary.period.period})</h3>
+            <div className="stat-tiles">
+              <div className="stat-tile">
+                <span className="stat-tile-label">Income</span>
+                <span className="stat-tile-value stat-tile-value--success">
+                  {formatMinor(summary.period.incomeMinor)}
+                </span>
+              </div>
+              <div className="stat-tile">
+                <span className="stat-tile-label">Expense</span>
+                <span className="stat-tile-value">{formatMinor(summary.period.expenseMinor)}</span>
+              </div>
+              <div className="stat-tile">
+                <span className="stat-tile-label">Net</span>
+                <span
+                  className={`stat-tile-value ${
+                    summary.period.netMinor >= 0 ? 'stat-tile-value--success' : 'stat-tile-value--error'
+                  }`}
+                >
+                  {formatMinor(summary.period.netMinor)}
+                </span>
+              </div>
+            </div>
+          </section>
+        ) : null}
 
-      <section>
-        <h3>Budget status</h3>
-        {status.length === 0 ? (
-          <p>No budgets set.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Category</th>
-                <th>Limit</th>
-                <th>Spent</th>
-                <th>Available</th>
-                <th>State</th>
-              </tr>
-            </thead>
-            <tbody>
-              {status.map((row) => (
-                <tr key={row.category}>
-                  <td>{row.category}</td>
-                  <td>{formatMinor(row.limitMinor)}</td>
-                  <td>{formatMinor(row.spentMinor)}</td>
-                  <td>{formatMinor(row.availableMinor)}</td>
-                  <td className={`status-${row.state}`}>{row.state}</td>
+        <section className="panel">
+          <h3>Budget status</h3>
+          {status.length === 0 ? (
+            <p>No budgets set.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th>Limit</th>
+                  <th>Spent</th>
+                  <th>Available</th>
+                  <th>State</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+              </thead>
+              <tbody>
+                {status.map((row) => (
+                  <tr key={row.category}>
+                    <td>{row.category}</td>
+                    <td className="numeric">{formatMinor(row.limitMinor)}</td>
+                    <td className="numeric">{formatMinor(row.spentMinor)}</td>
+                    <td className="numeric">{formatMinor(row.availableMinor)}</td>
+                    <td>
+                      <span className={`status-${row.state}`}>{row.state}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
 
-      <section>
-        <h3>Add transaction</h3>
-        <form onSubmit={(event) => void handleSubmit(event)}>
-          <label htmlFor="dash-amount">Amount</label>
-          <input
-            id="dash-amount"
-            type="text"
-            inputMode="decimal"
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            required
-          />
+        <section className="panel">
+          <h3>Add transaction</h3>
+          <form onSubmit={(event) => void handleSubmit(event)}>
+            <label htmlFor="dash-amount">Amount</label>
+            <input
+              id="dash-amount"
+              type="text"
+              inputMode="decimal"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              required
+            />
 
-          <label htmlFor="dash-category">Category</label>
-          <input
-            id="dash-category"
-            type="text"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-            required
-          />
+            <label htmlFor="dash-category">Category</label>
+            <input
+              id="dash-category"
+              type="text"
+              value={category}
+              onChange={(event) => setCategory(event.target.value)}
+              required
+            />
 
-          <label htmlFor="dash-kind">Kind</label>
-          <select
-            id="dash-kind"
-            value={kind}
-            onChange={(event) => setKind(event.target.value as 'expense' | 'income')}
-          >
-            <option value="expense">Expense</option>
-            <option value="income">Income</option>
-          </select>
+            <label htmlFor="dash-kind">Kind</label>
+            <select
+              id="dash-kind"
+              value={kind}
+              onChange={(event) => setKind(event.target.value as 'expense' | 'income')}
+            >
+              <option value="expense">Expense</option>
+              <option value="income">Income</option>
+            </select>
 
-          <label htmlFor="dash-note">Note</label>
-          <input
-            id="dash-note"
-            type="text"
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-          />
+            <label htmlFor="dash-note">Note</label>
+            <input
+              id="dash-note"
+              type="text"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
 
-          {submitError !== null ? <div role="alert">{submitError}</div> : null}
-          <button type="submit">Add transaction</button>
-        </form>
-      </section>
+            {submitError !== null ? <div role="alert">{submitError}</div> : null}
+            <button type="submit">Add transaction</button>
+          </form>
+        </section>
+      </div>
     </div>
   );
 }
