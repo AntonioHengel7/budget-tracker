@@ -151,6 +151,10 @@ export function logout(): Promise<{ ok: boolean }> {
   return request('/api/logout', { method: 'POST' });
 }
 
+export function startDemo(): Promise<{ username: string }> {
+  return request('/api/demo', { method: 'POST' });
+}
+
 export function me(): Promise<{ username: string }> {
   return request('/api/me');
 }
