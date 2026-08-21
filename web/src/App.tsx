@@ -47,16 +47,17 @@ export function App(): React.JSX.Element {
 
   if (auth.status === 'loggedOut') {
     return (
-      <>
-        <ThemeToggle />
+      <div style={{ position: 'relative' }}>
+        <div style={{ position: 'absolute', top: '1rem', right: '1rem' }}>
+          <ThemeToggle />
+        </div>
         <Login onLoggedIn={handleLoggedIn} />
-      </>
+      </div>
     );
   }
 
   return (
     <div>
-      <ThemeToggle />
       <nav>
         <button type="button" aria-current={view === 'dashboard'} onClick={() => setView('dashboard')}>
           Dashboard
@@ -71,6 +72,7 @@ export function App(): React.JSX.Element {
         <button type="button" aria-current={view === 'limits'} onClick={() => setView('limits')}>
           Limits
         </button>
+        <ThemeToggle />
         <span style={{ marginLeft: 'auto' }}>
           {auth.username} · <button type="button" onClick={() => void handleLogout()}>Log out</button>
         </span>
