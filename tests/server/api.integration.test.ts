@@ -290,6 +290,20 @@ describe('web API', () => {
       const list = await agent.get('/api/transactions');
       expect(list.status).toBe(200);
       expect(list.body).toHaveLength(5);
+      const categories = list.body.map(
+        (entry: { transaction: { category: string } }) => entry.transaction.category,
+      );
+      // Sorted by date ascending: salary (period start), groceries (-03),
+      // dining (-07), groceries (-10), transport (-15) -- see seedDemoAccount.
+      expect(categories).toEqual(['salary', 'groceries', 'dining', 'groceries', 'transport']);
+      const salary = list.body.find(
+        (entry: { transaction: { category: string } }) => entry.transaction.category === 'salary',
+      );
+      expect(salary.transaction).toMatchObject({ kind: 'income', amountMinor: 240000 });
+      const dining = list.body.find(
+        (entry: { transaction: { category: string } }) => entry.transaction.category === 'dining',
+      );
+      expect(dining.transaction).toMatchObject({ kind: 'expense', amountMinor: 2790 });
     });
 
     it('sweeps a stale demo account file but keeps a fresh one', async () => {
@@ -317,6 +331,54 @@ describe('web API', () => {
 
       await expect(access(staleFile)).rejects.toThrow();
       await expect(access(freshFile)).resolves.toBeUndefined();
+    });
+
+    it('never sweeps a real (non-demo-shaped) user store file, even one older than the TTL', async () => {
+      // Regression test for Socrates's finding 1: the sweep filters every
+      // entry through DEMO_FILENAME_PATTERN before ever stat-ing/unlinking
+      // it, so a real user's store file -- which never matches
+      // `demo-<8 hex>.json` -- structurally cannot be touched by it,
+      // regardless of age. If that filename check were ever loosened to
+      // match everything in dataDir, this file would get swept and this
+      // assertion would fail.
+      const realUserFile = join(dataDir, 'some-real-user.json');
+      await writeFile(realUserFile, JSON.stringify(emptyStore()), 'utf-8');
+      const longAgo = new Date(Date.now() - 60_000);
+      await utimes(realUserFile, longAgo, longAgo);
+
+      const sweepingApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        insecureCookies: true,
+        demoAccountTtlMs: 1_000,
+      });
+
+      const res = await request(sweepingApp).post('/api/demo');
+      expect(res.status).toBe(200);
+
+      await expect(access(realUserFile)).resolves.toBeUndefined();
+    });
+
+    it('caps total concurrent demo accounts and returns 503 once the cap is reached', async () => {
+      const cappedApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        insecureCookies: true,
+        demoAccountCap: 2,
+      });
+
+      for (let i = 0; i < 2; i += 1) {
+        const res = await request(cappedApp).post('/api/demo');
+        expect(res.status).toBe(200);
+      }
+
+      const capped = await request(cappedApp).post('/api/demo');
+      expect(capped.status).toBe(503);
+      expect(capped.body).toEqual({
+        error: 'demo accounts are temporarily unavailable, try again later',
+      });
     });
 
     it('rate-limits repeated /api/demo requests from the same IP', async () => {

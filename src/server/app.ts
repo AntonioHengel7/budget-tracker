@@ -68,6 +68,11 @@ export interface AppConfig {
    */
   readonly demoAccountTtlMs?: number;
   /**
+   * Overrides the default cap on total concurrent demo accounts -- mainly so
+   * tests don't need to create hundreds of accounts to exercise the cap.
+   */
+  readonly demoAccountCap?: number;
+  /**
    * Opts the session cookie out of the `Secure` flag, for local plaintext-HTTP
    * development only. Defaults to `false` -- cookies are `Secure` by default
    * and this must be explicitly enabled, never the reverse, so a deployment
@@ -100,18 +105,31 @@ const DEFAULT_API_RATE_LIMIT: RateLimitConfig = {
  * Each `/api/demo` call writes a brand-new store file to disk, so this is a
  * resource-exhaustion guard first and foremost, not a credential-stuffing
  * guard like `DEFAULT_LOGIN_RATE_LIMIT` -- 5 demo accounts/hour/IP is
- * generous for a human trying the product out, while keeping a scripted
- * caller from filling `dataDir` with disposable accounts faster than the
- * sweep below can clean them up.
+ * generous for a human trying the product out, while meaningfully slowing
+ * a single scripted caller. On its own this does not bound total disk
+ * usage -- a caller spread across many source IPs isn't slowed by a
+ * per-IP limit at all -- that's what `DEFAULT_MAX_DEMO_ACCOUNTS` below is
+ * for.
  */
 const DEFAULT_DEMO_RATE_LIMIT: RateLimitConfig = {
   windowMs: 60 * 60 * 1000,
   max: 5,
 };
 /** How long a demo account's store file is allowed to live before the sweep in `/api/demo` deletes it. */
-const DEMO_ACCOUNT_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DEMO_ACCOUNT_TTL_MS = 24 * 60 * 60 * 1000;
 /** Matches the filename shape produced by demo account generation below -- `demo-` plus 8 hex chars. */
 const DEMO_FILENAME_PATTERN = /^demo-[0-9a-f]{8}\.json$/;
+/**
+ * Hard cap on how many demo accounts may exist at once, checked after each
+ * sweep. This is what actually bounds disk/inode usage -- the per-IP rate
+ * limit above only slows a single source, so without this cap a caller
+ * spread across many IPs (or simply patient across the 24h TTL window)
+ * could still accumulate an unbounded number of demo account files. 200 is
+ * comfortably above any realistic resume/portfolio-traffic burst (the kind
+ * of spike this feature exists for) while keeping worst-case disk usage to
+ * a couple hundred small seeded store files.
+ */
+const DEFAULT_MAX_DEMO_ACCOUNTS = 200;
 /** Max attempts to generate a demo username before giving up (see `/api/demo` below). */
 const MAX_DEMO_USERNAME_ATTEMPTS = 5;
 
@@ -195,18 +213,21 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 }
 
 /**
- * Best-effort deletion of expired demo account store files. Runs on every
- * `/api/demo` call, before a new demo account is issued, so demo accounts
- * self-clean without needing a separate cron/scheduler process. Never throws
- * -- a sweep failure (e.g. a transient permission error, or `dataDir` not
- * existing yet) must never block issuing a new demo account, so every error
- * here (including `readdir` ENOENT on a not-yet-created `dataDir`) is
- * swallowed and simply treated as "nothing to sweep".
+ * Best-effort deletion of expired demo account store files, and returns how
+ * many demo account files remain afterward (the caller uses this to enforce
+ * `DEFAULT_MAX_DEMO_ACCOUNTS`). Runs on every `/api/demo` call, before a new
+ * demo account is issued, so demo accounts self-clean without needing a
+ * separate cron/scheduler process. Never throws -- a sweep failure (e.g. a
+ * transient permission error, or `dataDir` not existing yet) must never
+ * block issuing a new demo account, so every error here (including
+ * `readdir` ENOENT on a not-yet-created `dataDir`) is swallowed and simply
+ * treated as "nothing to sweep".
  */
-async function sweepStaleDemoAccounts(dataDir: string, ttlMs: number): Promise<void> {
+async function sweepStaleDemoAccounts(dataDir: string, ttlMs: number): Promise<number> {
   try {
     const entries = await readdir(dataDir);
     const now = Date.now();
+    let survivingCount = 0;
     for (const entry of entries) {
       if (!DEMO_FILENAME_PATTERN.test(entry)) {
         continue;
@@ -216,17 +237,22 @@ async function sweepStaleDemoAccounts(dataDir: string, ttlMs: number): Promise<v
         const stats = await stat(filePath);
         if (now - stats.mtimeMs > ttlMs) {
           await unlink(filePath);
+        } else {
+          survivingCount += 1;
         }
       } catch {
         // A single file's stat/unlink failing (e.g. it was removed by a
         // concurrent sweep, or a transient FS error) must not abort the
-        // sweep for every other file -- skip it and keep going.
+        // sweep for every other file -- skip it and keep going. Its
+        // survival is unknown, so it's not counted either way.
       }
     }
+    return survivingCount;
   } catch {
     // Covers readdir failing outright (missing dataDir, permission error,
     // ...) -- treated the same as "nothing to sweep", per this function's doc
     // comment above.
+    return 0;
   }
 }
 
@@ -419,7 +445,16 @@ export function createApp(config: AppConfig): Express {
   // DomainError/StorageError), so an unhandled seed failure still ends up as
   // a clean 400/500 response rather than crashing the process.
   app.post('/api/demo', demoLimiter, async (_req: Request, res: Response) => {
-    await sweepStaleDemoAccounts(config.dataDir, config.demoAccountTtlMs ?? DEMO_ACCOUNT_TTL_MS);
+    const survivingCount = await sweepStaleDemoAccounts(
+      config.dataDir,
+      config.demoAccountTtlMs ?? DEFAULT_DEMO_ACCOUNT_TTL_MS,
+    );
+
+    const cap = config.demoAccountCap ?? DEFAULT_MAX_DEMO_ACCOUNTS;
+    if (survivingCount >= cap) {
+      res.status(503).json({ error: 'demo accounts are temporarily unavailable, try again later' });
+      return;
+    }
 
     const username = await generateDemoUsername(config.dataDir);
     if (username === undefined) {

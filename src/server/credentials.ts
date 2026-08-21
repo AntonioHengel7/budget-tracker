@@ -108,6 +108,19 @@ export function loadCredentials(raw: string | undefined): Credential[] {
       throw err;
     }
 
+    // The `demo-` prefix is reserved for the demo-account system's own
+    // runtime-generated usernames (see `generateDemoUsername` in `app.ts`).
+    // Rejecting it here, at config-load time, guarantees a real configured
+    // user can never collide with -- or be mistaken for, by the sweep's
+    // `DEMO_FILENAME_PATTERN` match -- a demo account, without requiring any
+    // runtime check against the (unbounded, randomly-generated) set of demo
+    // usernames that may exist at any given moment.
+    if (entry.username.startsWith('demo-')) {
+      throw new CredentialsConfigError(
+        `AUTH_USERS_JSON username "${entry.username}" is reserved for the demo-account system and cannot be used`,
+      );
+    }
+
     const foldedUsername = entry.username.toLowerCase();
     if (seenUsernames.has(foldedUsername)) {
       throw new CredentialsConfigError(

@@ -75,6 +75,11 @@ describe('loadCredentials', () => {
     ]);
     expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
   });
+
+  it('throws CredentialsConfigError when a username starts with the reserved "demo-" prefix', () => {
+    const json = JSON.stringify([{ username: 'demo-antonio', passwordHash: VALID_HASH }]);
+    expect(() => loadCredentials(json)).toThrow(CredentialsConfigError);
+  });
 });
 
 describe('findCredential', () => {
