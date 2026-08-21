@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --color-bg: #e6ebe1;
   --color-surface: #f4f6f1;
   --color-border: #cdd6c6;
@@ -18,6 +19,7 @@
    sets of values in sync when editing either one. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
+    color-scheme: dark;
     --color-bg: #1a1815;
     --color-surface: #232019;
     --color-border: #3a3830;
@@ -34,6 +36,7 @@
 
 /* Kept in sync with the @media (prefers-color-scheme: dark) block above. */
 :root[data-theme='dark'] {
+  color-scheme: dark;
   --color-bg: #1a1815;
   --color-surface: #232019;
   --color-border: #3a3830;
@@ -63,6 +66,7 @@ h2 {
 
 nav {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 1.5rem;
   padding-bottom: 0.75rem;
@@ -102,7 +106,7 @@ nav button[aria-current='true'] {
   font-weight: 600;
 }
 
-input,
+input:not([type='checkbox']):not([type='radio']),
 select {
   padding: 0.5rem 1rem;
   border: 1px solid var(--color-border);
@@ -135,6 +139,17 @@ label {
   flex-direction: column;
   gap: 0.2rem;
   font-size: 0.9rem;
+}
+
+.pre-auth-shell {
+  display: flow-root;
+  position: relative;
+}
+
+.theme-toggle-corner {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
 }
 
 .login-page {

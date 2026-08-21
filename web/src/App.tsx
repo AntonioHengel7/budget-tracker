@@ -47,8 +47,8 @@ export function App(): React.JSX.Element {
 
   if (auth.status === 'loggedOut') {
     return (
-      <div style={{ position: 'relative' }}>
-        <div style={{ position: 'absolute', top: '1rem', right: '1rem' }}>
+      <div className="pre-auth-shell">
+        <div className="theme-toggle-corner">
           <ThemeToggle />
         </div>
         <Login onLoggedIn={handleLoggedIn} />

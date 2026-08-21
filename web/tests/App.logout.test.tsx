@@ -53,4 +53,28 @@ describe('App logout', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(unhandledRejections).toEqual([]);
   });
+
+  // Regression (Socrates, PR #75 round 1 NOTE): nothing pinned the theme
+  // toggle's location inside the authenticated nav row -- the entire point
+  // of moving it out of the pre-auth-only corner placement.
+  it('renders the theme toggle inside nav once logged in', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/me')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ username: 'antonio' }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected fetch to ${url}`));
+    }) as unknown as typeof fetch;
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /log out/i });
+    expect(
+      screen.getByRole('button', { name: /switch to .* theme/i }).closest('nav'),
+    ).not.toBeNull();
+  });
 });
