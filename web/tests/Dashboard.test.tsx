@@ -31,7 +31,7 @@ describe('Dashboard stat tiles and status pills', () => {
   // Issue #80 item 1: Net's tile is colored by sign -- success (green-ish)
   // when the period ended up in the black, error (red-ish) when in the red.
   // Income always gets the success tint per spec; Expense stays neutral.
-  it('colors the Net stat tile success when net is non-negative', async () => {
+  it('colors the Net stat tile success when net is positive', async () => {
     mockFetch(
       [],
       {
@@ -45,15 +45,37 @@ describe('Dashboard stat tiles and status pills', () => {
     await waitFor(() => expect(screen.getByText(/summary/i)).toBeInTheDocument());
 
     const incomeValue = screen.getByText('500.00');
-    expect(incomeValue).toHaveClass('stat-tile-value--success');
+    expect(incomeValue).toHaveClass('stat-tile-value-success');
 
     const netValue = screen.getByText('300.00');
-    expect(netValue).toHaveClass('stat-tile-value--success');
-    expect(netValue).not.toHaveClass('stat-tile-value--error');
+    expect(netValue).toHaveClass('stat-tile-value-success');
+    expect(netValue).not.toHaveClass('stat-tile-value-error');
 
     const expenseValue = screen.getByText('200.00');
-    expect(expenseValue).not.toHaveClass('stat-tile-value--success');
-    expect(expenseValue).not.toHaveClass('stat-tile-value--error');
+    expect(expenseValue).not.toHaveClass('stat-tile-value-success');
+    expect(expenseValue).not.toHaveClass('stat-tile-value-error');
+  });
+
+  // Boundary case (Socrates, PR #81 round 1 BLOCKING (1)): netMinor === 0 is
+  // the entire reason the predicate is `>= 0` rather than `> 0` -- without
+  // this, a mutant flipping `>=` to `>` survives (all other tests use a
+  // strictly positive or strictly negative netMinor, never exactly zero).
+  it('colors the Net stat tile success (not error) when net is exactly zero', async () => {
+    mockFetch(
+      [],
+      {
+        period: { period: '2026-08', incomeMinor: 10000, expenseMinor: 10000, netMinor: 0 },
+        byCategory: [],
+      },
+    );
+
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByText(/summary/i)).toBeInTheDocument());
+
+    const netValue = screen.getByText('0.00');
+    expect(netValue).toHaveClass('stat-tile-value-success');
+    expect(netValue).not.toHaveClass('stat-tile-value-error');
   });
 
   it('colors the Net stat tile error when net is negative', async () => {
@@ -70,13 +92,19 @@ describe('Dashboard stat tiles and status pills', () => {
     await waitFor(() => expect(screen.getByText(/summary/i)).toBeInTheDocument());
 
     const netValue = screen.getByText('-300.00');
-    expect(netValue).toHaveClass('stat-tile-value--error');
-    expect(netValue).not.toHaveClass('stat-tile-value--success');
+    expect(netValue).toHaveClass('stat-tile-value-error');
+    expect(netValue).not.toHaveClass('stat-tile-value-success');
   });
 
   // Issue #80 item 4: each budget status row renders its state as a
-  // `status-<state>` pill, keyed off the API's `state` field.
-  it('renders a status pill with the class matching each row\'s budget state', async () => {
+  // `status-<state>` pill on a <span> nested inside the <td>, keyed off the
+  // API's `state` field. Asserted structurally (not just via toHaveClass on
+  // whatever element the text resolves to) because `.status-over` etc. now
+  // carry pill layout (display: inline-block, padding, border-radius) --
+  // if that class ever landed back on the <td> directly it would break the
+  // table row layout, and a non-structural assertion wouldn't catch it
+  // (Socrates, PR #81 round 1 BLOCKING (2)).
+  it('renders each row\'s budget state as a pill <span> nested inside its <td>, not on the <td> itself', async () => {
     mockFetch(
       [
         {
@@ -116,12 +144,25 @@ describe('Dashboard stat tiles and status pills', () => {
     render(<Dashboard />);
 
     const overPill = await screen.findByText('over');
-    expect(overPill).toHaveClass('status-over');
-
     const atPill = screen.getByText('at');
-    expect(atPill).toHaveClass('status-at');
-
     const underPill = screen.getByText('under');
-    expect(underPill).toHaveClass('status-under');
+
+    for (const [pill, statusClass] of [
+      [overPill, 'status-over'],
+      [atPill, 'status-at'],
+      [underPill, 'status-under'],
+    ] as const) {
+      // The pill itself is a <span> carrying the status class...
+      expect(pill.tagName).toBe('SPAN');
+      expect(pill).toHaveClass(statusClass);
+
+      // ...nested inside a <td> that does NOT carry the status class itself
+      // (it must stay a plain table cell so the pill's inline-block/padding/
+      // border-radius don't disturb table row layout).
+      const cell = pill.closest('td');
+      expect(cell).not.toBeNull();
+      expect(cell?.tagName).toBe('TD');
+      expect(cell).not.toHaveClass(statusClass);
+    }
   });
 });

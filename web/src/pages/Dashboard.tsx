@@ -69,7 +69,7 @@ export function Dashboard(): React.JSX.Element {
             <div className="stat-tiles">
               <div className="stat-tile">
                 <span className="stat-tile-label">Income</span>
-                <span className="stat-tile-value stat-tile-value--success">
+                <span className="stat-tile-value stat-tile-value-success">
                   {formatMinor(summary.period.incomeMinor)}
                 </span>
               </div>
@@ -81,7 +81,7 @@ export function Dashboard(): React.JSX.Element {
                 <span className="stat-tile-label">Net</span>
                 <span
                   className={`stat-tile-value ${
-                    summary.period.netMinor >= 0 ? 'stat-tile-value--success' : 'stat-tile-value--error'
+                    summary.period.netMinor >= 0 ? 'stat-tile-value-success' : 'stat-tile-value-error'
                   }`}
                 >
                   {formatMinor(summary.period.netMinor)}
@@ -100,9 +100,9 @@ export function Dashboard(): React.JSX.Element {
               <thead>
                 <tr>
                   <th>Category</th>
-                  <th>Limit</th>
-                  <th>Spent</th>
-                  <th>Available</th>
+                  <th className="numeric">Limit</th>
+                  <th className="numeric">Spent</th>
+                  <th className="numeric">Available</th>
                   <th>State</th>
                 </tr>
               </thead>

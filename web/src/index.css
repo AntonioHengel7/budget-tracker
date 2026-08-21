@@ -219,8 +219,12 @@ td {
   border-bottom: 1px solid var(--color-border);
 }
 
-td.numeric {
+td.numeric,
+th.numeric {
   text-align: right;
+}
+
+td.numeric {
   font-variant-numeric: tabular-nums;
 }
 
@@ -285,11 +289,11 @@ tbody tr:nth-child(even) {
   color: var(--color-text);
 }
 
-.stat-tile-value--success {
+.stat-tile-value-success {
   color: var(--color-success);
 }
 
-.stat-tile-value--error {
+.stat-tile-value-error {
   color: var(--color-error);
 }
 

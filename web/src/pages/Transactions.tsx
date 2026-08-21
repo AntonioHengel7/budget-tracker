@@ -86,7 +86,7 @@ export function Transactions(): React.JSX.Element {
             <th>Date</th>
             <th>Category</th>
             <th>Kind</th>
-            <th>Amount</th>
+            <th className="numeric">Amount</th>
             <th>Note</th>
             <th></th>
           </tr>
