@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import express from 'express';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
@@ -55,6 +57,22 @@ export interface AppConfig {
    */
   readonly apiRateLimit?: RateLimitConfig;
   /**
+   * Overrides the default `/api/demo` rate limit -- mainly so tests don't
+   * need to wait out a real 1-hour window.
+   */
+  readonly demoRateLimit?: RateLimitConfig;
+  /**
+   * Overrides how long a demo account is allowed to live before the sweep in
+   * `/api/demo` deletes its store file -- mainly so tests don't need to wait
+   * out a real 24-hour TTL.
+   */
+  readonly demoAccountTtlMs?: number;
+  /**
+   * Overrides the default cap on total concurrent demo accounts -- mainly so
+   * tests don't need to create hundreds of accounts to exercise the cap.
+   */
+  readonly demoAccountCap?: number;
+  /**
    * Opts the session cookie out of the `Secure` flag, for local plaintext-HTTP
    * development only. Defaults to `false` -- cookies are `Secure` by default
    * and this must be explicitly enabled, never the reverse, so a deployment
@@ -83,6 +101,37 @@ const DEFAULT_API_RATE_LIMIT: RateLimitConfig = {
   windowMs: 60 * 1000,
   max: 120,
 };
+/**
+ * Each `/api/demo` call writes a brand-new store file to disk, so this is a
+ * resource-exhaustion guard first and foremost, not a credential-stuffing
+ * guard like `DEFAULT_LOGIN_RATE_LIMIT` -- 5 demo accounts/hour/IP is
+ * generous for a human trying the product out, while meaningfully slowing
+ * a single scripted caller. On its own this does not bound total disk
+ * usage -- a caller spread across many source IPs isn't slowed by a
+ * per-IP limit at all -- that's what `DEFAULT_DEMO_ACCOUNT_CAP` below is
+ * for.
+ */
+const DEFAULT_DEMO_RATE_LIMIT: RateLimitConfig = {
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+};
+/** How long a demo account's store file is allowed to live before the sweep in `/api/demo` deletes it. */
+const DEFAULT_DEMO_ACCOUNT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Matches the filename shape produced by demo account generation below -- `demo-` plus 8 hex chars. */
+const DEMO_FILENAME_PATTERN = /^demo-[0-9a-f]{8}\.json$/;
+/**
+ * Hard cap on how many demo accounts may exist at once, checked after each
+ * sweep. This is what actually bounds disk/inode usage -- the per-IP rate
+ * limit above only slows a single source, so without this cap a caller
+ * spread across many IPs (or simply patient across the 24h TTL window)
+ * could still accumulate an unbounded number of demo account files. 200 is
+ * comfortably above any realistic resume/portfolio-traffic burst (the kind
+ * of spike this feature exists for) while keeping worst-case disk usage to
+ * a couple hundred small seeded store files.
+ */
+const DEFAULT_DEMO_ACCOUNT_CAP = 200;
+/** Max attempts to generate a demo username before giving up (see `/api/demo` below). */
+const MAX_DEMO_USERNAME_ATTEMPTS = 5;
 
 function sessionCookieOptions(config: AppConfig): {
   httpOnly: true;
@@ -157,6 +206,130 @@ function authed(handler: AuthenticatedHandler): RequestHandler {
     }
     Promise.resolve(handler(req, res)).catch(next);
   };
+}
+
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && 'code' in err;
+}
+
+/**
+ * Best-effort deletion of expired demo account store files, and returns how
+ * many demo account files remain afterward (the caller uses this to enforce
+ * `DEFAULT_DEMO_ACCOUNT_CAP`). Runs on every `/api/demo` call, before a new
+ * demo account is issued, so demo accounts self-clean without needing a
+ * separate cron/scheduler process. Never throws -- a sweep failure (e.g. a
+ * transient permission error, or `dataDir` not existing yet) must never
+ * block issuing a new demo account, so every error here (including
+ * `readdir` ENOENT on a not-yet-created `dataDir`) is swallowed and simply
+ * treated as "nothing to sweep".
+ */
+async function sweepStaleDemoAccounts(dataDir: string, ttlMs: number): Promise<number> {
+  try {
+    const entries = await readdir(dataDir);
+    const now = Date.now();
+    let survivingCount = 0;
+    for (const entry of entries) {
+      if (!DEMO_FILENAME_PATTERN.test(entry)) {
+        continue;
+      }
+      const filePath = join(dataDir, entry);
+      try {
+        const stats = await stat(filePath);
+        if (now - stats.mtimeMs > ttlMs) {
+          await unlink(filePath);
+        } else {
+          survivingCount += 1;
+        }
+      } catch {
+        // A single file's stat/unlink failing (e.g. it was removed by a
+        // concurrent sweep, or a transient FS error) must not abort the
+        // sweep for every other file -- skip it and keep going. Its
+        // survival is unknown, so it's not counted either way.
+      }
+    }
+    return survivingCount;
+  } catch {
+    // Covers readdir failing outright (missing dataDir, permission error,
+    // ...) -- treated the same as "nothing to sweep", per this function's doc
+    // comment above.
+    return 0;
+  }
+}
+
+/**
+ * Generates an unused `demo-<8 hex chars>` username, matching
+ * `USERNAME_PATTERN` in `paths.ts`. Collisions are astronomically unlikely
+ * (1 in 2^32 per attempt) but checked for anyway rather than assumed away --
+ * retries up to `MAX_DEMO_USERNAME_ATTEMPTS` times before giving up.
+ */
+async function generateDemoUsername(dataDir: string): Promise<string | undefined> {
+  for (let attempt = 0; attempt < MAX_DEMO_USERNAME_ATTEMPTS; attempt += 1) {
+    const username = `demo-${randomBytes(4).toString('hex')}`;
+    const filePath = resolveUserStorePath(dataDir, username);
+    try {
+      await stat(filePath);
+      // File exists -- collision, retry.
+    } catch (err) {
+      if (isErrnoException(err) && err.code === 'ENOENT') {
+        return username;
+      }
+      throw err;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Seeds a freshly created demo account's store with a small, realistic
+ * dataset: one income transaction, four expense transactions spread across
+ * groceries/dining/transport, and category limits chosen so groceries reads
+ * "under" its limit and dining reads "over" -- demonstrating both status
+ * colors (`.status-over`/`.status-under` in `web/src/index.css`) without
+ * requiring any manual setup from whoever clicks "try it out".
+ */
+async function seedDemoAccount(filePath: string): Promise<void> {
+  const period = currentPeriod();
+  const periodStart = `${period}-01`;
+
+  await addTransaction(filePath, {
+    amount: '2400.00',
+    category: 'salary',
+    kind: 'income',
+    date: periodStart,
+  });
+  await addTransaction(filePath, {
+    amount: '64.50',
+    category: 'groceries',
+    kind: 'expense',
+    date: `${period}-03`,
+    note: "Trader Joe's",
+  });
+  await addTransaction(filePath, {
+    amount: '38.20',
+    category: 'groceries',
+    kind: 'expense',
+    date: `${period}-10`,
+    note: 'Weekly grocery run',
+  });
+  await addTransaction(filePath, {
+    amount: '27.90',
+    category: 'dining',
+    kind: 'expense',
+    date: `${period}-07`,
+    note: 'Lunch with a friend',
+  });
+  await addTransaction(filePath, {
+    amount: '45.00',
+    category: 'transport',
+    kind: 'expense',
+    date: `${period}-15`,
+    note: 'Gas',
+  });
+
+  // groceries: spent 64.50 + 38.20 = 102.70 against a 150.00 limit -> under.
+  await setLimit(filePath, { category: 'groceries', amount: '150.00', effectiveFrom: period });
+  // dining: spent 27.90 against a 25.00 limit -> over.
+  await setLimit(filePath, { category: 'dining', amount: '25.00', effectiveFrom: period });
 }
 
 function isBodyParserSyntaxError(
@@ -253,6 +426,48 @@ export function createApp(config: AppConfig): Express {
   app.post('/api/logout', (_req: Request, res: Response) => {
     res.clearCookie('session', sessionCookieOptions(config));
     res.status(200).json({ ok: true });
+  });
+
+  // Stacked on top of generalLimiter above, same shape as loginLimiter --
+  // see DEFAULT_DEMO_RATE_LIMIT's doc comment for why this exists (disk
+  // resource exhaustion, not credential stuffing).
+  const demoLimiter = rateLimit({
+    windowMs: config.demoRateLimit?.windowMs ?? DEFAULT_DEMO_RATE_LIMIT.windowMs,
+    limit: config.demoRateLimit?.max ?? DEFAULT_DEMO_RATE_LIMIT.max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'too many demo requests, try again later' },
+  });
+
+  // No try/catch here, matching /api/login above: Express 5 forwards a
+  // rejected promise from an async handler to the error middleware at the
+  // bottom of this file automatically (e.g. seedDemoAccount below throwing a
+  // DomainError/StorageError), so an unhandled seed failure still ends up as
+  // a clean 400/500 response rather than crashing the process.
+  app.post('/api/demo', demoLimiter, async (_req: Request, res: Response) => {
+    const survivingCount = await sweepStaleDemoAccounts(
+      config.dataDir,
+      config.demoAccountTtlMs ?? DEFAULT_DEMO_ACCOUNT_TTL_MS,
+    );
+
+    const cap = config.demoAccountCap ?? DEFAULT_DEMO_ACCOUNT_CAP;
+    if (survivingCount >= cap) {
+      res.status(503).json({ error: 'demo accounts are temporarily unavailable, try again later' });
+      return;
+    }
+
+    const username = await generateDemoUsername(config.dataDir);
+    if (username === undefined) {
+      res.status(500).json({ error: 'could not allocate a demo account' });
+      return;
+    }
+
+    const filePath = resolveUserStorePath(config.dataDir, username);
+    await seedDemoAccount(filePath);
+
+    const token = signSession(username, config.sessionSecret);
+    res.cookie('session', token, { ...sessionCookieOptions(config), maxAge: THIRTY_DAYS_MS });
+    res.status(200).json({ username });
   });
 
   const authMiddleware = createAuthMiddleware(config.sessionSecret);
