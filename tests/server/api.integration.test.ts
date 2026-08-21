@@ -1,10 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, access, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/server/app.js';
+import { emptyStore } from '../../src/storage/schema.js';
 
 // supertest talks plain HTTP, never HTTPS -- a Secure-flagged cookie (the
 // createApp default, per #17's review) is correctly never replayed by
@@ -273,5 +274,68 @@ describe('web API', () => {
       const health = await agent.get('/healthz');
       expect(health.status).toBe(200);
     }
+  });
+
+  describe('POST /api/demo', () => {
+    it('creates a seeded demo account, sets a session cookie, and lets an authenticated follow-up read the seeded transactions', async () => {
+      const agent = request.agent(app);
+      const res = await agent.post('/api/demo');
+
+      expect(res.status).toBe(200);
+      expect(res.body.username).toMatch(/^demo-[0-9a-f]{8}$/);
+      const cookies = res.headers['set-cookie'] as unknown as string[];
+      expect(cookies).toBeDefined();
+      expect(cookies.some((c) => c.startsWith('session=') && c.includes('HttpOnly'))).toBe(true);
+
+      const list = await agent.get('/api/transactions');
+      expect(list.status).toBe(200);
+      expect(list.body).toHaveLength(5);
+    });
+
+    it('sweeps a stale demo account file but keeps a fresh one', async () => {
+      const staleUsername = 'demo-deadbeef';
+      const freshUsername = 'demo-cafebabe';
+      const staleFile = join(dataDir, `${staleUsername}.json`);
+      const freshFile = join(dataDir, `${freshUsername}.json`);
+      await writeFile(staleFile, JSON.stringify(emptyStore()), 'utf-8');
+      await writeFile(freshFile, JSON.stringify(emptyStore()), 'utf-8');
+
+      // Backdate the stale file's mtime past the (small, test-only) TTL below.
+      const longAgo = new Date(Date.now() - 60_000);
+      await utimes(staleFile, longAgo, longAgo);
+
+      const sweepingApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        insecureCookies: true,
+        demoAccountTtlMs: 1_000,
+      });
+
+      const res = await request(sweepingApp).post('/api/demo');
+      expect(res.status).toBe(200);
+
+      await expect(access(staleFile)).rejects.toThrow();
+      await expect(access(freshFile)).resolves.toBeUndefined();
+    });
+
+    it('rate-limits repeated /api/demo requests from the same IP', async () => {
+      const limitedApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        insecureCookies: true,
+        demoRateLimit: { windowMs: 60_000, max: 2 },
+      });
+
+      const agent = request.agent(limitedApp);
+      for (let i = 0; i < 2; i += 1) {
+        const res = await agent.post('/api/demo');
+        expect(res.status).toBe(200);
+      }
+
+      const limited = await agent.post('/api/demo');
+      expect(limited.status).toBe(429);
+    });
   });
 });
