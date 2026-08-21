@@ -4,6 +4,7 @@ import { Login } from './pages/Login.js';
 import { Dashboard } from './pages/Dashboard.js';
 import { Transactions } from './pages/Transactions.js';
 import { Limits } from './pages/Limits.js';
+import { ThemeToggle } from './ThemeToggle.js';
 
 type View = 'dashboard' | 'transactions' | 'limits';
 type AuthState = { readonly status: 'checking' } | { readonly status: 'loggedOut' } | {
@@ -45,11 +46,17 @@ export function App(): React.JSX.Element {
   }
 
   if (auth.status === 'loggedOut') {
-    return <Login onLoggedIn={handleLoggedIn} />;
+    return (
+      <>
+        <ThemeToggle />
+        <Login onLoggedIn={handleLoggedIn} />
+      </>
+    );
   }
 
   return (
     <div>
+      <ThemeToggle />
       <nav>
         <button type="button" aria-current={view === 'dashboard'} onClick={() => setView('dashboard')}>
           Dashboard
