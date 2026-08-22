@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { BCRYPT_COST } from '../../src/server/credentials.js';
 import { boot } from '../../src/server/index.js';
 
 const VALID_SECRET = 'a'.repeat(32);
@@ -130,7 +131,7 @@ describe('boot', () => {
     process.chdir(tmpCwd);
 
     try {
-      const passwordHash = await bcrypt.hash(REAL_PASSWORD, 10); // AUTH_USERS_JSON requires bcrypt cost 10
+      const passwordHash = await bcrypt.hash(REAL_PASSWORD, BCRYPT_COST);
       vi.stubEnv('SESSION_SECRET', VALID_SECRET);
       vi.stubEnv('AUTH_USERS_JSON', JSON.stringify([{ username: 'antonio', passwordHash }]));
       vi.stubEnv('DATA_DIR', '');
