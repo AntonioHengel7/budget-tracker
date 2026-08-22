@@ -86,7 +86,7 @@ export function Transactions(): React.JSX.Element {
             <th>Date</th>
             <th>Category</th>
             <th>Kind</th>
-            <th>Amount</th>
+            <th className="numeric">Amount</th>
             <th>Note</th>
             <th></th>
           </tr>
@@ -97,7 +97,7 @@ export function Transactions(): React.JSX.Element {
               <td>{st.transaction.date}</td>
               <td>{st.transaction.category}</td>
               <td>{st.transaction.kind}</td>
-              <td>{formatMinor(st.transaction.amountMinor)}</td>
+              <td className="numeric">{formatMinor(st.transaction.amountMinor)}</td>
               <td>{st.transaction.note ?? ''}</td>
               <td>
                 <button type="button" onClick={() => void handleRemove(st.id)}>
