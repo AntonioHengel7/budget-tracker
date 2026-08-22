@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createCategoryBudget } from '../domain/budget.js';
 import type { CategoryBudget } from '../domain/budget.js';
@@ -312,7 +312,293 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Attempts to atomically steal a lock file that has just been judged stale.
+ * How long a `.steal` meta-mutex (see `atomicSteal`/`acquireStealMutex`
+ * below) is trusted as "still legitimately being created" when its content
+ * can't be parsed into a pid. Its only legitimate writer does a single
+ * `handle.writeFile()` of a few bytes immediately after `open('wx')`
+ * succeeds -- nothing legitimate ever takes anywhere close to this long to
+ * finish that. Used only as a fallback for the narrow window between a
+ * writer's `open('wx')` and its `writeFile` landing (see `acquireStealMutex`);
+ * once content *is* parseable, pid liveness (immediate, not time-based)
+ * takes over.
+ */
+const STEAL_MUTEX_GRACE_MS = 5_000;
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    // Signal 0: no signal is actually sent; the OS still validates the pid
+    // and reports whether it could be signaled at all.
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'ESRCH') {
+      return false;
+    }
+    // EPERM (alive, owned by another user) or anything else unexpected:
+    // treat conservatively as alive -- never steal a mutex we can't prove
+    // is dead.
+    return true;
+  }
+}
+
+/**
+ * Generic atomic "steal `path` if, and only if, what's actually there right
+ * now is still reclaimable" primitive, shared by both the main lock's steal
+ * (issue #51) and its own `.steal` meta-mutex's recovery (issue #51
+ * follow-up, BLOCKING #1/#3 from review).
+ *
+ * Two tempting simpler designs both turn out not to be race-free, for the
+ * same root reason -- proven empirically by re-running a multi-stealer test
+ * under randomized artificial delay on every fs call (jitter), which
+ * reliably surfaced both flaws even though neither reproduced under normal
+ * (unjittered) timing, and by a reviewer reproducing the second directly:
+ *
+ * - "Write a unique token to a temp file, `rename()` it onto `path`, then
+ *   read `path` back and confirm it's still our token." Not race-free:
+ *   `rename(src, path)` unconditionally replaces whatever is at `path`, so
+ *   it is not itself exclusive. P1 can rename its token in and read it
+ *   straight back (confirmed) *before* P2 -- who decided "stale"
+ *   independently, earlier -- renames its own token over P1's and also
+ *   reads its own token back, confirmed. Both "win".
+ * - "Decide staleness via one `lstat`, then unconditionally `rm` based on
+ *   that decision" (even when the decision-and-act pair is itself
+ *   serialized against other stealers via a meta-mutex). Not race-free
+ *   either: nothing stops the *legitimate* holder from releasing and a
+ *   brand new, perfectly ordinary acquirer from creating a fresh live lock
+ *   in the gap between our `lstat` and our `rm` -- our `rm` then deletes
+ *   that new caller's live lock based on stale information, and our steal
+ *   proceeds to also acquire. Two live holders.
+ *
+ * The fix used here never acts on a *decision* made moments earlier -- it
+ * acts only on what an atomic, exclusive operation just proved is
+ * physically at `path` this instant:
+ *
+ * 1. `rename(path, tombstonePath)` (tombstonePath unique per attempt) --
+ *    POSIX guarantees this atomically detaches whatever directory entry
+ *    currently exists at `path`, and if multiple processes race to rename
+ *    the *same* source path, only one can succeed; the rest get ENOENT,
+ *    because the entry is simply gone by the time they look. That is a true
+ *    compare-and-detach, unlike renaming *into* a path. ENOENT here means
+ *    someone else already detached/released it first -- we lost, report
+ *    `false`.
+ * 2. Inspect the detached file's mtime and content. Both are now private to
+ *    us (nobody else knows `tombstonePath`), and -- crucially -- they
+ *    reflect exactly what was physically at `path` at the moment of our
+ *    detach, not a moments-old decision. `isStillReclaimable` decides based
+ *    on this fresh snapshot alone.
+ * 3. If it's NOT reclaimable (we detached something that's actually live --
+ *    e.g. a legitimate new holder appeared after whatever originally made
+ *    us think this path was worth stealing), put it back via
+ *    `link(tombstonePath, path)` -- a hard link, not rename-into, so the
+ *    restore is *also* exclusive: it fails EEXIST rather than clobbering
+ *    anything a third party legitimately created at `path` in the meantime,
+ *    and -- being a hard link to the same inode -- it restores the original
+ *    content and mtime exactly. Report `false` either way: we do not hold
+ *    `path`.
+ * 4. If it IS reclaimable, discard the tombstone and claim `path` fresh via
+ *    the same exclusive `open('wx')` the uncontested path uses. If that
+ *    loses (EEXIST -- some unrelated, ordinary acquirer won the now-empty
+ *    slot in the brief gap before ours), that's fine: the reclaimed content
+ *    really is gone for good either way, and exactly one new legitimate
+ *    holder (them, not us) ends up owning it -- report `false`.
+ * 5. Every exit path -- success, "not reclaimable", or an unexpected throw
+ *    -- cleans up the tombstone and (if we created it but failed to fully
+ *    commit our own write to `path`) `path` itself exactly once. No path
+ *    through this function can leave an orphaned file behind, including
+ *    when a downstream `writeFile`/`close`/`link` call rejects.
+ */
+async function atomicSteal(
+  path: string,
+  filePath: string,
+  isStillReclaimable: (info: { content: string; mtimeMs: number }) => boolean,
+): Promise<boolean> {
+  const tombstonePath = `${path}.${process.pid}.${randomUUID()}.stolen`;
+
+  try {
+    await rename(path, tombstonePath);
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'ENOENT') {
+      // Someone else already detached (or released) it first -- we lost,
+      // nothing to clean up.
+      return false;
+    }
+    throw new StorageError(
+      `failed to steal "${path}" for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+
+  // From here on, tombstonePath exists and is private to us -- every exit
+  // path, success or throw, must clean it up exactly once.
+  try {
+    const [stats, content] = await Promise.all([
+      lstat(tombstonePath),
+      readFile(tombstonePath, 'utf-8'),
+    ]);
+
+    if (!isStillReclaimable({ content, mtimeMs: stats.mtimeMs })) {
+      // Not actually reclaimable -- restore it exactly as found, unless a
+      // legitimate occupant has since appeared at `path` (in which case
+      // our detached copy is now orphaned; the outer finally discards it).
+      try {
+        await link(tombstonePath, path);
+      } catch (err) {
+        if (!isErrnoException(err) || err.code !== 'EEXIST') {
+          throw new StorageError(
+            `failed to restore "${path}" for store file "${filePath}": ${(err as Error).message}`,
+            { cause: err },
+          );
+        }
+      }
+      return false;
+    }
+
+    // Genuinely reclaimable -- claim `path` fresh.
+    let claimed = false;
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      claimed = true;
+      try {
+        await handle.writeFile(`${process.pid}\n`, 'utf-8');
+      } finally {
+        await handle.close();
+      }
+      return true;
+    } catch (err) {
+      if (claimed) {
+        // We created the file but failed to fully commit our write to it --
+        // never leave an indeterminate-content file behind that nobody can
+        // safely reason about the origin of.
+        await rm(path, { force: true }).catch(() => {
+          // best-effort cleanup only
+        });
+      }
+      if (isErrnoException(err) && err.code === 'EEXIST') {
+        // An unrelated, ordinary acquirer's open('wx') won the now-empty
+        // slot before ours did. Still correctly reclaimed either way.
+        return false;
+      }
+      throw new StorageError(
+        `failed to acquire "${path}" for store file "${filePath}": ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+  } finally {
+    await rm(tombstonePath, { force: true });
+  }
+}
+
+function isStealMutexReclaimable({
+  content,
+  mtimeMs,
+}: {
+  content: string;
+  mtimeMs: number;
+}): boolean {
+  const holderPid = Number.parseInt(content, 10);
+  if (Number.isInteger(holderPid) && holderPid > 0) {
+    return !isProcessAlive(holderPid);
+  }
+  // Empty/malformed content: either genuinely orphaned mid-creation (a
+  // writer that crashed between its `open('wx')` and its `writeFile`), or,
+  // very briefly, a legitimate writer that hasn't finished that single
+  // write yet. Fall back to a short, generous grace period rather than
+  // either permanently refusing to reclaim it or reclaiming a
+  // still-being-created file out from under its rightful creator.
+  return Date.now() - mtimeMs > STEAL_MUTEX_GRACE_MS;
+}
+
+/**
+ * Acquires `${lockPath}.steal`, a small, always-briefly-held meta-mutex that
+ * serializes stale-lock steal *attempts* against `lockPath` across all
+ * racers (see `tryStealStaleLock`), creating it fresh via exclusive
+ * `open('wx')` -- or, if another holder's pid is provably dead (or its
+ * content is old enough that nothing legitimate could still be mid-write),
+ * atomically reclaiming it via `atomicSteal`.
+ *
+ * Regression (issue #51 follow-up, review BLOCKING #1): the very first
+ * version of this meta-mutex had no recovery path of its own at all -- if
+ * its holder crashed (or any other error path skipped its cleanup) before
+ * releasing it, every future `acquireLock` call would hit EEXIST on it
+ * forever, across restarts, with no way out. That's exactly the permanent-
+ * deadlock failure mode `STALE_LOCK_MS` exists to prevent for the main
+ * lock, reintroduced one level up. This mutex now gets the same
+ * steal-when-abandoned treatment as the main lock, via the same
+ * `atomicSteal` primitive -- just gated on pid liveness (immediate,
+ * definitive) rather than a time threshold, since nothing legitimate ever
+ * holds this mutex for more than a handful of fast fs calls.
+ */
+async function acquireStealMutex(stealMutexPath: string, filePath: string): Promise<boolean> {
+  let created = false;
+  try {
+    const handle = await open(stealMutexPath, 'wx', 0o600);
+    created = true;
+    try {
+      await handle.writeFile(`${process.pid}\n`, 'utf-8');
+    } finally {
+      await handle.close();
+    }
+    return true;
+  } catch (err) {
+    if (created) {
+      // We created the file but failed to fully commit our write to it --
+      // never leave an indeterminate-content mutex file behind.
+      await rm(stealMutexPath, { force: true }).catch(() => {
+        // best-effort cleanup only
+      });
+    }
+    if (!isErrnoException(err) || err.code !== 'EEXIST') {
+      throw new StorageError(
+        `failed to acquire steal-mutex for store file "${filePath}": ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+  }
+
+  // Contended -- cheap gate before ever touching the mutex file: read its
+  // current holder and only attempt the heavier `atomicSteal` reclaim (a
+  // full detach-inspect-maybe-restore cycle) if it's provably reclaimable.
+  // This keeps the overwhelmingly common case -- the mutex genuinely held
+  // by a live racer for a few milliseconds -- a single cheap read with zero
+  // churn on the mutex file, rather than every contended attempt paying for
+  // a full atomic-detach-and-restore round trip (which would otherwise
+  // multiply how often the mutex is briefly vacant, and with it, how often
+  // an unrelated acquirer could win that vacancy).
+  let stats;
+  let content: string;
+  try {
+    [stats, content] = await Promise.all([
+      lstat(stealMutexPath),
+      readFile(stealMutexPath, 'utf-8'),
+    ]);
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'ENOENT') {
+      // Released between our open() and this read -- caller's normal poll
+      // loop retries shortly.
+      return false;
+    }
+    throw new StorageError(
+      `failed to inspect steal-mutex for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+
+  if (!isStealMutexReclaimable({ content, mtimeMs: stats.mtimeMs })) {
+    // Genuinely still held by a live racer -- back off without touching it.
+    return false;
+  }
+
+  // The cheap gate says reclaimable, but that snapshot is already
+  // moments old -- `atomicSteal` re-verifies against a fresh, race-free
+  // detach before actually acting, exactly like the main lock's own steal.
+  return atomicSteal(stealMutexPath, filePath, isStealMutexReclaimable);
+}
+
+/**
+ * Attempts to steal a lock file that has just been judged stale.
  *
  * Regression (issue #51): the original steal was a plain "check age, then
  * `rm`" -- not atomic w.r.t. other stealers racing the same check. That let
@@ -325,127 +611,39 @@ function sleep(ms: number): Promise<void> {
  * the exact lost-update race #9's locking was built to close, just narrowed
  * to the window right after a stale-lock steal.
  *
- * Two tempting fixes both turn out not to be race-free, for the same root
- * reason -- proven empirically here by re-running the multi-stealer test
- * under randomized artificial delay on every fs call (jitter), which
- * reliably surfaced both flaws even though neither reproduced under normal
- * (unjittered) timing:
+ * Closing this needs two distinct things, both provided by
+ * `acquireStealMutex` + `atomicSteal` above:
  *
- * - "Write a unique token to a temp file, `rename()` it onto `lockPath`,
- *   then read `lockPath` back and confirm it's still our token." Not
- *   race-free: `rename(src, lockPath)` unconditionally replaces whatever is
- *   at `lockPath`, so it is not itself exclusive. P1 can rename its token in
- *   and read it straight back (confirmed) *before* P2 -- who decided
- *   "stale" independently, earlier -- renames its own token over P1's and
- *   also reads its own token back, confirmed. Both "win".
- * - "Exclusively `rename(lockPath, tombstonePath)` away (this part *is*
- *   atomic -- only one racer can detach a given source path), inspect the
- *   detached copy's mtime, and if it turns out to have been live rather
- *   than stale, restore it via `link()`." The detach itself is race-free,
- *   but it unavoidably leaves `lockPath` briefly absent -- and during that
- *   gap, an unrelated, perfectly ordinary `open(lockPath, 'wx')` attempt
- *   (nothing to do with stealing at all) can win the now-empty slot before
- *   the restore runs. The result: the true holder (whose live lock we
- *   detached) is silently orphaned, a second, unrelated caller now also
- *   holds the lock, and the restore then fails to put anything back because
- *   the slot is occupied again -- the exact double-hold this function
- *   exists to prevent, just relocated into the restore path.
- *
- * Both failed attempts try to make a single racer's *own* detach-then-act
- * sequence atomic in isolation. The reliable fix instead serializes the
- * *attempt* itself across all racers, using a second, always-briefly-held
- * meta-lock (`${lockPath}.steal`) so that at most one racer is ever
- * inspecting or touching `lockPath` during a steal at any given moment --
- * no detach-then-restore dance, and therefore no window for anyone else to
- * intervene:
- *
- * 1. Acquire the meta-lock via the same exclusive `open('wx')` primitive
- *    used everywhere else. If another racer already holds it, we simply
- *    report `false` -- the caller's normal poll loop retries shortly, no
- *    busy-loop.
- * 2. Under the meta-lock, re-check `lockPath`'s staleness. This re-check is
- *    now genuinely race-free: every other stealer is blocked behind the
- *    same meta-lock, so nothing else can be concurrently mutating
- *    `lockPath` for staleness-related reasons. (The true holder, if still
- *    alive, only ever touches `lockPath` via its own final `releaseLock`
- *    `rm` -- which is idempotent/harmless to interleave with either
- *    outcome below.)
- * 3. If it's no longer stale (a legitimate holder must have refreshed it,
- *    or our caller's outer check was already out of date), release the
- *    meta-lock and report `false` -- we never touched `lockPath` itself, so
- *    there is nothing to undo.
- * 4. If it's still genuinely stale, `rm` it and immediately `open('wx')` a
- *    fresh lock in its place. If that `open('wx')` loses to some unrelated,
- *    ordinary acquirer who grabbed the slot in the brief gap between our
- *    `rm` and our `open`, that's fine and not a bug: the stale lock really
- *    is gone for good either way, and exactly one new legitimate holder
- *    (them, not us) ends up owning it -- report `false` and let the caller
- *    loop back and contend normally.
- * 5. Always release the meta-lock before returning, win or lose.
+ * - Other *stealers* racing the same stale lock must be excluded from each
+ *   other, so one stealer can never clobber another stealer's already-won
+ *   fresh lock. `acquireStealMutex` does this: only one racer is ever inside
+ *   the block below for a given `lockPath` at a time.
+ * - Even with only one stealer active, it must never act on a
+ *   moments-old staleness *decision* -- an ordinary (non-stealing) acquirer
+ *   can create a brand new live lock at any instant, including the instant
+ *   right before an unconditional `rm` (review BLOCKING #3, reproduced
+ *   directly). `atomicSteal` closes this by never deciding-then-acting: it
+ *   detaches whatever is physically at `lockPath` *right now* and judges
+ *   staleness from that same instant, restoring it unharmed if it turns out
+ *   not to be the stale lock after all.
  */
 async function tryStealStaleLock(lockPath: string, filePath: string): Promise<boolean> {
   const stealMutexPath = `${lockPath}.steal`;
 
-  try {
-    const mutexHandle = await open(stealMutexPath, 'wx', 0o600);
-    await mutexHandle.close();
-  } catch (err) {
-    if (isErrnoException(err) && err.code === 'EEXIST') {
-      // Another racer is already mid-steal against this lockPath -- back
-      // off, the caller's normal poll loop retries shortly.
-      return false;
-    }
-    throw new StorageError(
-      `failed to acquire steal-mutex for store file "${filePath}": ${(err as Error).message}`,
-      { cause: err },
-    );
+  const acquiredMutex = await acquireStealMutex(stealMutexPath, filePath);
+  if (!acquiredMutex) {
+    // Another racer is already mid-steal against this lockPath (or we lost
+    // a steal-mutex reclaim race to one) -- back off, the caller's normal
+    // poll loop retries shortly.
+    return false;
   }
 
   try {
-    let stats;
-    try {
-      stats = await lstat(lockPath);
-    } catch (err) {
-      if (isErrnoException(err) && err.code === 'ENOENT') {
-        // Released (or already stolen by whoever last held this mutex)
-        // between our caller's check and this one -- nothing to steal.
-        return false;
-      }
-      throw new StorageError(
-        `failed to inspect lock for store file "${filePath}": ${(err as Error).message}`,
-        { cause: err },
-      );
-    }
-
-    if (Date.now() - stats.mtimeMs <= STALE_LOCK_MS) {
-      // No longer stale -- a legitimate holder refreshed it since our
-      // caller's check. We never touched lockPath; nothing to undo.
-      return false;
-    }
-
-    await rm(lockPath, { force: true });
-
-    try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      try {
-        await handle.writeFile(`${process.pid}\n`, 'utf-8');
-      } finally {
-        await handle.close();
-      }
-      return true;
-    } catch (err) {
-      if (isErrnoException(err) && err.code === 'EEXIST') {
-        // An unrelated, ordinary acquirer's open('wx') won the now-empty
-        // slot before ours did. The stale lock is still correctly gone;
-        // we just don't hold the new one -- the caller loops back and
-        // contends normally.
-        return false;
-      }
-      throw new StorageError(
-        `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
-        { cause: err },
-      );
-    }
+    return await atomicSteal(
+      lockPath,
+      filePath,
+      ({ mtimeMs }) => Date.now() - mtimeMs > STALE_LOCK_MS,
+    );
   } finally {
     await rm(stealMutexPath, { force: true });
   }
@@ -509,6 +707,14 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
         // of the loop, exactly as if we'd found the lock still live.
       }
     } catch (statErr) {
+      // A StorageError here already came from `tryStealStaleLock` (or
+      // something it called) with its own precise, already-descriptive
+      // message -- propagate it as-is instead of re-wrapping it behind a
+      // generic "failed to inspect lock" label that would obscure which
+      // operation actually failed.
+      if (statErr instanceof StorageError) {
+        throw statErr;
+      }
       if (!isErrnoException(statErr) || statErr.code !== 'ENOENT') {
         throw new StorageError(
           `failed to inspect lock for store file "${filePath}": ${(statErr as Error).message}`,
