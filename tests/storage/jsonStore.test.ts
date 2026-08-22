@@ -259,6 +259,22 @@ describe('jsonStore', () => {
     expect(mode).toBe(0o600);
   });
 
+  // Regression (#52): mkdir's { recursive: true } used no explicit mode,
+  // so the store/lock directory ended up at the default (umask-dependent,
+  // typically 0755) mode -- group/world-readable+executable, letting other
+  // local users list the directory's filenames even though they can't read
+  // the 0600 file contents. saveStore must create a freshly-created store
+  // directory at 0700, matching the file's own tightened permissions.
+  it('creates a fresh store directory with mode 0700, not the default umask-dependent mode', async () => {
+    const freshDir = join(dir, 'nested', 'store-dir');
+    const freshFilePath = join(freshDir, 'budget.json');
+
+    await saveStore(freshFilePath, sampleStore);
+
+    const mode = statSync(freshDir).mode & 0o777;
+    expect(mode).toBe(0o700);
+  });
+
   it('a simulated write failure leaves no partial/corrupt file (atomic write via temp file + rename)', async () => {
     vi.mocked(writeFile).mockRejectedValueOnce(new Error('simulated disk full'));
 
@@ -369,6 +385,19 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
       updateStore(filePath, appendMutator(txA), { timeoutMs: 200 }),
     ).rejects.toThrow(/timed out.*lock/i);
     expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  // Regression (#52): acquireLock has its own mkdir call site (separate
+  // from saveStore's), also creating the containing directory when --file
+  // points at a not-yet-created path. It must be tightened the same way.
+  it('creates a fresh lock directory with mode 0700, not the default umask-dependent mode', async () => {
+    const freshDir = join(dir, 'nested-lock', 'store-dir');
+    const freshFilePath = join(freshDir, 'budget.json');
+
+    await updateStore(freshFilePath, appendMutator(txA));
+
+    const mode = statSync(freshDir).mode & 0o777;
+    expect(mode).toBe(0o700);
   });
 
   it('releases the lock even when the mutator throws, and does not persist a partial write', async () => {

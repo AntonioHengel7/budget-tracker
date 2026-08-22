@@ -261,7 +261,13 @@ export async function saveStore(filePath: string, store: PersistedStore): Promis
   const json = JSON.stringify(store, null, 2);
 
   try {
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    // mkdir's `mode` only applies to directories it actually creates -- if
+    // `dir` already existed (e.g. from a store created before this fix, or
+    // under a permissive umask), `recursive: true` makes mkdir a silent
+    // no-op and its mode is left untouched. chmod explicitly so the "store
+    // dir is 0700" guarantee holds regardless of whether mkdir created it.
+    await chmod(dir, 0o700);
     // flag: 'wx' -- exclusive create, fails instead of following a
     // pre-existing symlink at tempPath. The unguessable randomUUID() temp
     // name already makes this unlikely, but 'wx' closes it structurally
@@ -332,7 +338,12 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
 
   // Mirrors saveStore's own mkdir: --file may point at a not-yet-created
   // directory, and taking the lock must not narrow that existing behavior.
-  await mkdir(dirname(lockPath), { recursive: true });
+  // mode + chmod for the same reason as saveStore's mkdir: mkdir's `mode`
+  // is a no-op on an already-existing directory, so an explicit chmod is
+  // needed to guarantee 0700 regardless of prior state.
+  const lockDir = dirname(lockPath);
+  await mkdir(lockDir, { recursive: true, mode: 0o700 });
+  await chmod(lockDir, 0o700);
 
   for (;;) {
     try {
