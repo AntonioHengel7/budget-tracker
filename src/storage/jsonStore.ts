@@ -312,6 +312,146 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Attempts to atomically steal a lock file that has just been judged stale.
+ *
+ * Regression (issue #51): the original steal was a plain "check age, then
+ * `rm`" -- not atomic w.r.t. other stealers racing the same check. That let
+ * this happen: P1 sees the lock is stale, `rm`s it, loops back, and creates
+ * a fresh live lock via `open('wx')`. P2, already past its own staleness
+ * check on the *old* mtime (i.e. before P1 acted), then `rm`s what it still
+ * believes is the stale lock -- but that unconditional `rm` actually deletes
+ * P1's brand-new live lock. A third acquirer (or P2 itself, next loop) can
+ * now acquire the lock while P1 believes it still holds it and is mid-write:
+ * the exact lost-update race #9's locking was built to close, just narrowed
+ * to the window right after a stale-lock steal.
+ *
+ * Two tempting fixes both turn out not to be race-free, for the same root
+ * reason -- proven empirically here by re-running the multi-stealer test
+ * under randomized artificial delay on every fs call (jitter), which
+ * reliably surfaced both flaws even though neither reproduced under normal
+ * (unjittered) timing:
+ *
+ * - "Write a unique token to a temp file, `rename()` it onto `lockPath`,
+ *   then read `lockPath` back and confirm it's still our token." Not
+ *   race-free: `rename(src, lockPath)` unconditionally replaces whatever is
+ *   at `lockPath`, so it is not itself exclusive. P1 can rename its token in
+ *   and read it straight back (confirmed) *before* P2 -- who decided
+ *   "stale" independently, earlier -- renames its own token over P1's and
+ *   also reads its own token back, confirmed. Both "win".
+ * - "Exclusively `rename(lockPath, tombstonePath)` away (this part *is*
+ *   atomic -- only one racer can detach a given source path), inspect the
+ *   detached copy's mtime, and if it turns out to have been live rather
+ *   than stale, restore it via `link()`." The detach itself is race-free,
+ *   but it unavoidably leaves `lockPath` briefly absent -- and during that
+ *   gap, an unrelated, perfectly ordinary `open(lockPath, 'wx')` attempt
+ *   (nothing to do with stealing at all) can win the now-empty slot before
+ *   the restore runs. The result: the true holder (whose live lock we
+ *   detached) is silently orphaned, a second, unrelated caller now also
+ *   holds the lock, and the restore then fails to put anything back because
+ *   the slot is occupied again -- the exact double-hold this function
+ *   exists to prevent, just relocated into the restore path.
+ *
+ * Both failed attempts try to make a single racer's *own* detach-then-act
+ * sequence atomic in isolation. The reliable fix instead serializes the
+ * *attempt* itself across all racers, using a second, always-briefly-held
+ * meta-lock (`${lockPath}.steal`) so that at most one racer is ever
+ * inspecting or touching `lockPath` during a steal at any given moment --
+ * no detach-then-restore dance, and therefore no window for anyone else to
+ * intervene:
+ *
+ * 1. Acquire the meta-lock via the same exclusive `open('wx')` primitive
+ *    used everywhere else. If another racer already holds it, we simply
+ *    report `false` -- the caller's normal poll loop retries shortly, no
+ *    busy-loop.
+ * 2. Under the meta-lock, re-check `lockPath`'s staleness. This re-check is
+ *    now genuinely race-free: every other stealer is blocked behind the
+ *    same meta-lock, so nothing else can be concurrently mutating
+ *    `lockPath` for staleness-related reasons. (The true holder, if still
+ *    alive, only ever touches `lockPath` via its own final `releaseLock`
+ *    `rm` -- which is idempotent/harmless to interleave with either
+ *    outcome below.)
+ * 3. If it's no longer stale (a legitimate holder must have refreshed it,
+ *    or our caller's outer check was already out of date), release the
+ *    meta-lock and report `false` -- we never touched `lockPath` itself, so
+ *    there is nothing to undo.
+ * 4. If it's still genuinely stale, `rm` it and immediately `open('wx')` a
+ *    fresh lock in its place. If that `open('wx')` loses to some unrelated,
+ *    ordinary acquirer who grabbed the slot in the brief gap between our
+ *    `rm` and our `open`, that's fine and not a bug: the stale lock really
+ *    is gone for good either way, and exactly one new legitimate holder
+ *    (them, not us) ends up owning it -- report `false` and let the caller
+ *    loop back and contend normally.
+ * 5. Always release the meta-lock before returning, win or lose.
+ */
+async function tryStealStaleLock(lockPath: string, filePath: string): Promise<boolean> {
+  const stealMutexPath = `${lockPath}.steal`;
+
+  try {
+    const mutexHandle = await open(stealMutexPath, 'wx', 0o600);
+    await mutexHandle.close();
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'EEXIST') {
+      // Another racer is already mid-steal against this lockPath -- back
+      // off, the caller's normal poll loop retries shortly.
+      return false;
+    }
+    throw new StorageError(
+      `failed to acquire steal-mutex for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+
+  try {
+    let stats;
+    try {
+      stats = await lstat(lockPath);
+    } catch (err) {
+      if (isErrnoException(err) && err.code === 'ENOENT') {
+        // Released (or already stolen by whoever last held this mutex)
+        // between our caller's check and this one -- nothing to steal.
+        return false;
+      }
+      throw new StorageError(
+        `failed to inspect lock for store file "${filePath}": ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+
+    if (Date.now() - stats.mtimeMs <= STALE_LOCK_MS) {
+      // No longer stale -- a legitimate holder refreshed it since our
+      // caller's check. We never touched lockPath; nothing to undo.
+      return false;
+    }
+
+    await rm(lockPath, { force: true });
+
+    try {
+      const handle = await open(lockPath, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${process.pid}\n`, 'utf-8');
+      } finally {
+        await handle.close();
+      }
+      return true;
+    } catch (err) {
+      if (isErrnoException(err) && err.code === 'EEXIST') {
+        // An unrelated, ordinary acquirer's open('wx') won the now-empty
+        // slot before ours did. The stale lock is still correctly gone;
+        // we just don't hold the new one -- the caller loops back and
+        // contends normally.
+        return false;
+      }
+      throw new StorageError(
+        `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+  } finally {
+    await rm(stealMutexPath, { force: true });
+  }
+}
+
+/**
  * Acquires an exclusive lock on `filePath` by creating `${filePath}.lock`
  * with the `wx` flag (O_CREAT | O_EXCL): the filesystem guarantees that
  * create fails with EEXIST if the file already exists, and that guarantee
@@ -324,7 +464,8 @@ function sleep(ms: number): Promise<void> {
  * proceeding without the lock -- a loud, clear failure instead of silently
  * racing the other writer and possibly losing its update. A lock file older
  * than STALE_LOCK_MS is assumed to belong to a crashed holder and is stolen
- * rather than waited out.
+ * -- atomically, via `tryStealStaleLock` (issue #51) -- rather than waited
+ * out.
  */
 async function acquireLock(filePath: string, timeoutMs: number): Promise<string> {
   const lockPath = `${filePath}.lock`;
@@ -360,7 +501,12 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
     try {
       const lockStats = await lstat(lockPath);
       if (Date.now() - lockStats.mtimeMs > STALE_LOCK_MS) {
-        await rm(lockPath, { force: true });
+        if (await tryStealStaleLock(lockPath, filePath)) {
+          return lockPath;
+        }
+        // else: lost the steal race to another concurrent stealer -- fall
+        // through to the deadline check/sleep below and retry from the top
+        // of the loop, exactly as if we'd found the lock still live.
       }
     } catch (statErr) {
       if (!isErrnoException(statErr) || statErr.code !== 'ENOENT') {

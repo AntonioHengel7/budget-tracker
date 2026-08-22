@@ -5,14 +5,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+  // Every fs call `acquireLock`/`updateStore` makes is wrapped in a `vi.fn`
+  // (not just `writeFile`) so the issue #51 race test below can inject
+  // randomized latency on all of them -- that's what makes it actually
+  // exercise many-stealers-racing-one-stale-lock interleavings, rather than
+  // just the happy path.
+  return {
+    ...actual,
+    writeFile: vi.fn(actual.writeFile),
+    rm: vi.fn(actual.rm),
+    lstat: vi.fn(actual.lstat),
+    open: vi.fn(actual.open),
+    rename: vi.fn(actual.rename),
+    readFile: vi.fn(actual.readFile),
+  };
 });
 
-// Imported after the mock so jsonStore.ts picks up the mocked `writeFile`.
-import { writeFile } from 'node:fs/promises';
+// Imported after the mock so jsonStore.ts picks up the mocked fs functions.
+import { lstat, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { ValidationError } from '../../src/domain/errors.js';
 import { loadStore, saveStore, StorageError, updateStore } from '../../src/storage/jsonStore.js';
 import type { PersistedStore, StoredTransaction } from '../../src/storage/schema.js';
+
+const mockedFsFns = [writeFile, rm, lstat, open, rename, readFile] as const;
 
 let dir: string;
 let filePath: string;
@@ -20,12 +35,16 @@ let filePath: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'jsonstore-test-'));
   filePath = join(dir, 'budget.json');
-  vi.mocked(writeFile).mockClear();
+  for (const fn of mockedFsFns) {
+    vi.mocked(fn).mockClear();
+  }
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-  vi.mocked(writeFile).mockReset();
+  for (const fn of mockedFsFns) {
+    vi.mocked(fn).mockReset();
+  }
 });
 
 const sampleStore: PersistedStore = {
@@ -352,6 +371,131 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
     const final = await loadStore(filePath);
     expect(final.transactions).toEqual([txA]);
   });
+
+  // Regression (issue #51): the stale-lock steal used to be a plain
+  // "lstat-then-rm", not atomic w.r.t. other stealers racing the same
+  // check. P1 could see the lock is stale, rm it, loop back, and create a
+  // fresh live lock -- and then P2, having already decided "stale" from its
+  // own earlier lstat (taken before P1 acted), would unconditionally rm
+  // *whatever is currently at that path*, deleting P1's brand-new live lock
+  // instead of the originally-stale one. A third racer (or P2 itself, next
+  // loop) could then acquire the lock while P1 believed it still held it and
+  // was mid-write -- reopening the exact lost-update race #9's locking was
+  // built to close, just narrowed to the window right after a steal.
+  //
+  // This seeds a single stale lock and fires many concurrent updateStore
+  // calls at it -- every one of them must go through the steal path at
+  // (nearly) the same time, which is exactly the multi-stealer scenario
+  // above. With the old code this can lose writes (two "holders" interleave
+  // their load-modify-save cycles and one clobbers the other); with the
+  // steal-mutex-serialized steal, only one stealer ever wins at a time, so
+  // every single one of the N transactions must survive. At normal
+  // (unthrottled) timing this alone doesn't reliably reproduce the old bug
+  // -- real fs calls on a local disk are fast enough that the specific bad
+  // interleaving is rare. The test below this one throttles every fs call
+  // with randomized latency specifically to force that interleaving open;
+  // this one is kept as a cheap, always-fast smoke test of the same
+  // scenario at realistic speed.
+  it('many concurrent updateStore calls racing to steal one stale lock never lose a write', async () => {
+    const lockPath = `${filePath}.lock`;
+    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+
+    const N = 30;
+    const stored: StoredTransaction[] = Array.from({ length: N }, (_, i) => ({
+      id: `tx-steal-${i}`,
+      transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: i + 1 },
+    }));
+
+    const results = await Promise.all(
+      stored.map((entry) => updateStore(filePath, appendMutator(entry), { timeoutMs: 5000 })),
+    );
+
+    expect(results.map((r) => r.id).sort()).toEqual(stored.map((s) => s.id).sort());
+
+    const final = await loadStore(filePath);
+    expect(final.transactions.map((t) => t.id).sort()).toEqual(stored.map((s) => s.id).sort());
+    expect(final.transactions).toHaveLength(N);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  // The test above proves the scenario is handled correctly at realistic
+  // speed, but a check-then-act race like this one is inherently timing
+  // dependent -- at natural fs speed on a local disk, the specific bad
+  // interleaving described above (P2's unconditional rm executing *after*
+  // P1 has already recreated a fresh lock) is rare enough that a naive,
+  // still-buggy implementation can pass the test above almost every time
+  // (verified directly against a pre-fix build of this file: the test above
+  // passed 5/5 runs against the broken `lstat`-then-`rm` steal, and even a
+  // first, *also* subtly-broken fix attempt -- rename()-a-token-onto-the-
+  // lock-path with a post-rename read-back verify -- passed it consistently
+  // too, despite still losing double-digit percentages of writes under
+  // this jittered version).
+  //
+  // This test forces the race open deliberately: every fs call `acquireLock`
+  // makes (`open`, `lstat`, `rm`, `rename`, `readFile`, `writeFile`) is
+  // wrapped with a random 0-15ms delay before it actually runs, which
+  // reorders how many concurrent stealers' operations interleave relative
+  // to each other far more aggressively than real disk I/O ever would. If
+  // any given racer's steal attempt is not correctly atomic w.r.t. every
+  // other racer's steal attempt, this reliably surfaces it as lost writes
+  // (verified: it reproduced the loss on both broken implementations above
+  // in the majority of runs, at both N=20/8ms-jitter and N=40/15ms-jitter).
+  // Against the current steal-mutex-serialized implementation this must
+  // never lose a write, however the fs calls happen to interleave.
+  it('issue #51 regression: many concurrent stealers under randomized fs latency never lose a write or double-hold the lock', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const jitter = () => new Promise<void>((resolve) => setTimeout(resolve, Math.random() * 15));
+    const withJitter =
+      <TArgs extends unknown[], TReturn>(real: (...args: TArgs) => Promise<TReturn>) =>
+      async (...args: TArgs): Promise<TReturn> => {
+        await jitter();
+        return real(...args);
+      };
+
+    for (const [fn, real] of [
+      [rm, actualFs.rm],
+      [lstat, actualFs.lstat],
+      [open, actualFs.open],
+      [rename, actualFs.rename],
+      [readFile, actualFs.readFile],
+      [writeFile, actualFs.writeFile],
+    ] as const) {
+      // `as any`: fs.promises' overloaded signatures don't unify cleanly
+      // through a single generic wrapper; this is test-only
+      // latency-injection plumbing, not production code.
+      vi.mocked(fn).mockImplementation(withJitter(real as any) as any);
+    }
+
+    try {
+      const lockPath = `${filePath}.lock`;
+      writeFileSync(lockPath, '99999\n', { flag: 'wx' });
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, old, old);
+
+      const N = 30;
+      const stored: StoredTransaction[] = Array.from({ length: N }, (_, i) => ({
+        id: `tx-jitter-${i}`,
+        transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: i + 1 },
+      }));
+
+      const results = await Promise.all(
+        stored.map((entry) => updateStore(filePath, appendMutator(entry), { timeoutMs: 15_000 })),
+      );
+
+      expect(results.map((r) => r.id).sort()).toEqual(stored.map((s) => s.id).sort());
+
+      const final = await loadStore(filePath);
+      expect(final.transactions.map((t) => t.id).sort()).toEqual(stored.map((s) => s.id).sort());
+      expect(final.transactions).toHaveLength(N);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      for (const fn of mockedFsFns) {
+        vi.mocked(fn).mockReset();
+      }
+    }
+  }, 20_000);
 
   it('honours timeoutMs (does not busy-loop forever) when the lock path is a dangling symlink', async () => {
     // Regression (Hobbes, PR #50 round 1 BLOCKING): open(lockPath, 'wx')
