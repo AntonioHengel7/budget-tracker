@@ -261,7 +261,17 @@ export async function saveStore(filePath: string, store: PersistedStore): Promis
   const json = JSON.stringify(store, null, 2);
 
   try {
-    await mkdir(dir, { recursive: true });
+    // mkdir's `mode` only applies to directories it actually creates -- under
+    // a permissive umask, the created dir's mode can still end up looser than
+    // 0o700. `created` is truthy only when this call actually made `dir`
+    // (undefined if it already existed), so the follow-up chmod re-asserts
+    // 0700 solely on a directory this code just created -- never on a
+    // pre-existing directory the tool doesn't own (e.g. the caller's cwd when
+    // `--file`/BUDGET_FILE resolves there).
+    const created = await mkdir(dir, { recursive: true, mode: 0o700 });
+    if (created) {
+      await chmod(dir, 0o700);
+    }
     // flag: 'wx' -- exclusive create, fails instead of following a
     // pre-existing symlink at tempPath. The unguessable randomUUID() temp
     // name already makes this unlikely, but 'wx' closes it structurally
@@ -332,7 +342,21 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
 
   // Mirrors saveStore's own mkdir: --file may point at a not-yet-created
   // directory, and taking the lock must not narrow that existing behavior.
-  await mkdir(dirname(lockPath), { recursive: true });
+  // Same gated-chmod rationale as saveStore: only re-assert 0700 on a
+  // directory this call actually created (`created` truthy), never on a
+  // pre-existing directory the tool doesn't own.
+  const lockDir = dirname(lockPath);
+  try {
+    const created = await mkdir(lockDir, { recursive: true, mode: 0o700 });
+    if (created) {
+      await chmod(lockDir, 0o700);
+    }
+  } catch (err) {
+    throw new StorageError(
+      `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
 
   for (;;) {
     try {
