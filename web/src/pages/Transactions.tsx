@@ -80,34 +80,36 @@ export function Transactions(): React.JSX.Element {
         <button type="submit">Filter</button>
       </form>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Category</th>
-            <th>Kind</th>
-            <th className="numeric">Amount</th>
-            <th>Note</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {transactions.map((st) => (
-            <tr key={st.id}>
-              <td>{st.transaction.date}</td>
-              <td>{st.transaction.category}</td>
-              <td>{st.transaction.kind}</td>
-              <td className="numeric">{formatMinor(st.transaction.amountMinor)}</td>
-              <td>{st.transaction.note ?? ''}</td>
-              <td>
-                <button type="button" onClick={() => void handleRemove(st.id)}>
-                  Remove
-                </button>
-              </td>
+      <div className="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Category</th>
+              <th>Kind</th>
+              <th className="numeric">Amount</th>
+              <th>Note</th>
+              <th></th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {transactions.map((st) => (
+              <tr key={st.id}>
+                <td>{st.transaction.date}</td>
+                <td>{st.transaction.category}</td>
+                <td>{st.transaction.kind}</td>
+                <td className="numeric">{formatMinor(st.transaction.amountMinor)}</td>
+                <td>{st.transaction.note ?? ''}</td>
+                <td>
+                  <button type="button" onClick={() => void handleRemove(st.id)}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

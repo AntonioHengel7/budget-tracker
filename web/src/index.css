@@ -207,6 +207,16 @@ label {
   background: var(--color-border);
 }
 
+/* Tables have a wide min-content width (many columns) that doesn't fit
+   narrow mobile viewports (issue #77: 34px overflow at 320px, 74px at
+   280px). Wrapping the table in this scrollable container confines the
+   overflow to the table itself instead of letting it push out the whole
+   page horizontally. */
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;

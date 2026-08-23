@@ -96,30 +96,32 @@ export function Dashboard(): React.JSX.Element {
           {status.length === 0 ? (
             <p>No budgets set.</p>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Category</th>
-                  <th className="numeric">Limit</th>
-                  <th className="numeric">Spent</th>
-                  <th className="numeric">Available</th>
-                  <th>State</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.map((row) => (
-                  <tr key={row.category}>
-                    <td>{row.category}</td>
-                    <td className="numeric">{formatMinor(row.limitMinor)}</td>
-                    <td className="numeric">{formatMinor(row.spentMinor)}</td>
-                    <td className="numeric">{formatMinor(row.availableMinor)}</td>
-                    <td>
-                      <span className={`status-${row.state}`}>{row.state}</span>
-                    </td>
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th className="numeric">Limit</th>
+                    <th className="numeric">Spent</th>
+                    <th className="numeric">Available</th>
+                    <th>State</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {status.map((row) => (
+                    <tr key={row.category}>
+                      <td>{row.category}</td>
+                      <td className="numeric">{formatMinor(row.limitMinor)}</td>
+                      <td className="numeric">{formatMinor(row.spentMinor)}</td>
+                      <td className="numeric">{formatMinor(row.availableMinor)}</td>
+                      <td>
+                        <span className={`status-${row.state}`}>{row.state}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
 
