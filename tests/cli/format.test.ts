@@ -48,6 +48,26 @@ describe('formatTable', () => {
 
     expect(table).toContain(note);
   });
+
+  it('strips Unicode bidi override characters used for Trojan-Source-style spoofing', () => {
+    // U+202E (RLO) can flip the visual order of the text that follows it,
+    // e.g. making "evil" render reversed or hiding it among reordered text.
+    const note = 'evil\u202enote';
+    const table = formatTable(['id', 'note'], [['1', note]]);
+
+    expect(table).not.toContain('\u202e');
+    expect(table).toContain('evilnote');
+  });
+
+  it('strips zero-width characters used to visually hide content', () => {
+    // U+200B (ZWSP) is invisible when rendered but present in the string,
+    // and could be used to split up or hide a flagged word from filters.
+    const note = 'evi\u200bl note';
+    const table = formatTable(['id', 'note'], [['1', note]]);
+
+    expect(table).not.toContain('\u200b');
+    expect(table).toContain('evil note');
+  });
 });
 
 describe('sanitizeCell (exported)', () => {
