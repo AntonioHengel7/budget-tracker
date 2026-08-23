@@ -34,11 +34,16 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
  * codepoints never touch the C0/C1 control ranges above. Covers:
  *  - Bidi embedding/override/isolate controls: U+202A-U+202E (LRE, RLE, PDF,
  *    LRO, RLO), U+2066-U+2069 (LRI, RLI, FSI, PDI).
- *  - Bidi marks: U+200E (LRM), U+200F (RLM).
- *  - Zero-width characters: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ),
- *    U+2060 (word joiner), U+FEFF (zero-width no-break space / BOM).
+ *  - Bidi marks (the full `Bidi_Control` property -- the Trojan-Source /
+ *    CVE-2021-42574 set): U+200E (LRM), U+200F (RLM), U+061C (ALM, resolves
+ *    identically to RLM under the UBA).
+ *  - Zero-width and invisible-operator characters: U+200B (ZWSP), U+200C
+ *    (ZWNJ), U+200D (ZWJ), U+2060 (word joiner), U+2061-U+2064 (invisible
+ *    math operators: function application, times, separator, plus --
+ *    adjacent to and as unprintable as U+2060, so folded into the same
+ *    stripped range), U+FEFF (zero-width no-break space / BOM).
  */
-const UNICODE_SPOOF_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+const UNICODE_SPOOF_CHARS = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 
 /**
  * Strips terminal control characters (ESC and friends) and Unicode
