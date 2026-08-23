@@ -65,8 +65,14 @@ program
       const filePath = resolveFilePath();
       const date = options.date ?? todayIsoDate();
       const result = await addTransaction(filePath, { ...options, amount, category, date });
+      // category/date echo back argv the caller just typed, not store
+      // content -- still routed through sanitizeCell so every
+      // terminal-writing chokepoint sanitizes uniformly (see format.ts's
+      // sanitizeCell docstring), not just the store-content-sourced ones.
       console.log(
-        `added ${result.id} (${result.transaction.kind} ${formatAmount(result.transaction.amountMinor)} ${result.transaction.category} on ${result.transaction.date})`,
+        sanitizeCell(
+          `added ${result.id} (${result.transaction.kind} ${formatAmount(result.transaction.amountMinor)} ${result.transaction.category} on ${result.transaction.date})`,
+        ),
       );
     });
   });
@@ -78,7 +84,10 @@ program
     await run(async () => {
       const filePath = resolveFilePath();
       const removed = await removeTransaction(filePath, id);
-      console.log(`removed ${removed.id}`);
+      // id is argv the caller just typed, not store content -- sanitized
+      // for the same uniform-chokepoint reason as the `add` confirmation
+      // above.
+      console.log(sanitizeCell(`removed ${removed.id}`));
     });
   });
 
@@ -135,8 +144,13 @@ limitCommand
       const filePath = resolveFilePath();
       const budget = await setLimit(filePath, { ...options, category, amount });
       const matched = budget.limits.find((limit) => limit.effectiveFrom === options.effectiveFrom);
+      // category/effectiveFrom echo back argv the caller just typed, not
+      // store content -- sanitized for the same uniform-chokepoint reason as
+      // the `add` confirmation above.
       console.log(
-        `set limit for "${budget.category}": ${matched ? formatAmount(matched.amountMinor) : 'n/a'} effective ${options.effectiveFrom} (rollover: ${budget.rollover})`,
+        sanitizeCell(
+          `set limit for "${budget.category}": ${matched ? formatAmount(matched.amountMinor) : 'n/a'} effective ${options.effectiveFrom} (rollover: ${budget.rollover})`,
+        ),
       );
     });
   });
@@ -186,7 +200,10 @@ program
       const filePath = resolveFilePath();
       const period = options.period ?? currentPeriod();
       const result = await getSummary(filePath, { period });
-      console.log(`period ${result.period.period}`);
+      // period echoes back argv (or the computed default), not store
+      // content -- sanitized for the same uniform-chokepoint reason as the
+      // `add` confirmation above.
+      console.log(sanitizeCell(`period ${result.period.period}`));
       console.log(`income:  ${formatAmount(result.period.incomeMinor)}`);
       console.log(`expense: ${formatAmount(result.period.expenseMinor)}`);
       console.log(`net:     ${formatSignedAmount(result.period.netMinor)}`);
