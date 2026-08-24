@@ -406,8 +406,9 @@ function isProcessAlive(pid: number): boolean {
  *    link to its own lock.
  *
  * The fix: never detach `path` at all, and use filesystem identity
- * (device + inode) -- not a moments-old decision -- as the compare-and-swap
- * token for the one moment `path` actually changes:
+ * (device + inode), last-modified instant, and exact content -- not a
+ * moments-old decision -- as the compare-and-swap token for the one moment
+ * `path` actually changes:
  *
  * 1. Read `path`'s current stats and content directly, in place. `path` is
  *    never touched by this -- reads are inherently safe to do concurrently
@@ -416,14 +417,14 @@ function isProcessAlive(pid: number): boolean {
  * 2. If `isStillReclaimable` says no, we are done -- return `false`.
  *    Nothing was ever removed or replaced, so there is nothing to restore.
  * 3. If yes, write the replacement content into a private temp file (again,
- *    `path` itself still untouched), then re-`lstat` `path` by name one
- *    last time, right before the swap. If its `(dev, ino)` no longer
- *    matches what was read in step 1, some other holder or acquirer has
- *    since replaced `path` -- back off (`false`) instead of clobbering
- *    whatever is there now.
- * 4. Only if the identity still matches do we `rename(tempPath, path)` --
- *    POSIX guarantees this is atomic and, critically, `path` is *never*
- *    missing at any point: it holds the old file right up until the
+ *    `path` itself still untouched), then re-`lstat` and re-`readFile`
+ *    `path` by name one last time, right before the swap. If its
+ *    `(dev, ino, mtimeMs, content)` no longer exactly matches what was read
+ *    in step 1, some other holder or acquirer has since replaced `path` --
+ *    back off (`false`) instead of clobbering whatever is there now.
+ * 4. Only if every one of those still matches do we `rename(tempPath,
+ *    path)` -- POSIX guarantees this is atomic and, critically, `path` is
+ *    *never* missing at any point: it holds the old file right up until the
  *    instant the rename lands the new one.
  *
  * The gap between step 3's identity check and step 4's rename is not a true
@@ -436,6 +437,27 @@ function isProcessAlive(pid: number): boolean {
  * at all times either the old file or the new one -- never absent, and
  * never judged from a copy that has drifted out of sync with what is
  * actually there.
+ *
+ * Why `(dev, ino)` alone is not enough (CI-only regression against PR #82
+ * round 2 BLOCKING 2's own regression test, not reproducible on macOS/APFS
+ * locally, root-caused by re-running that test with temporary instrumentation
+ * logging the actual stat values on both sides of the check): every writer
+ * that can ever occupy `path` -- an ordinary acquirer's `open(path, 'wx')`,
+ * and this function's own `rename(tempPath, path)` -- does so only after the
+ * previous occupant's directory entry is already gone, i.e. after an
+ * `unlink`. Some filesystems' inode allocators (observed in CI; APFS's
+ * monotonic catalog-ID allocation does not do this, which is why this could
+ * not be reproduced locally) can hand the very next `open(..., 'wx')` after
+ * an `unlink` the *same* inode number just freed, purely by allocator
+ * coincidence -- a classic ABA: a brand new, unrelated live lock can end up
+ * with the exact `(dev, ino)` the just-stolen stale lock had, with nothing
+ * to do with actually being the same file. `mtimeMs` and `content` close
+ * this at zero extra cost on the read-in-step-1 side (both are already
+ * captured there for `isStillReclaimable`) and one extra `readFile` on the
+ * read-in-step-3 side: a file that did not exist a moment ago cannot share
+ * the old file's exact last-modified instant, and an ordinary acquirer's
+ * fresh lock (or another racer's steal) never happens to hold byte-for-byte
+ * the same content the stale file had.
  *
  * Every exit path -- success, "not reclaimable", CAS failure, or an
  * unexpected throw -- cleans up the private temp file exactly once, guarded
@@ -488,10 +510,15 @@ async function reclaimStaleFile(
     // Compare-and-swap: only replace `path` if it still identifies the
     // exact file judged stale above. `lstat`, not `stat` -- the identity
     // check is about the directory entry itself, matching how staleness is
-    // judged everywhere else in this file.
+    // judged everywhere else in this file. `(dev, ino)` alone is not a
+    // strong enough token -- see the ABA-via-inode-reuse note in this
+    // function's doc comment -- so `mtimeMs` and `content` (both already
+    // read once in step 1, at no extra cost there) are re-read and compared
+    // too.
     let current;
+    let currentContent: string;
     try {
-      current = await lstat(path);
+      [current, currentContent] = await Promise.all([lstat(path), readFile(path, 'utf-8')]);
     } catch (err) {
       if (isErrnoException(err) && err.code === 'ENOENT') {
         // Released, with nobody holding it right now -- decline rather than
@@ -502,7 +529,12 @@ async function reclaimStaleFile(
       throw err;
     }
 
-    if (current.dev !== stats.dev || current.ino !== stats.ino) {
+    if (
+      current.dev !== stats.dev ||
+      current.ino !== stats.ino ||
+      current.mtimeMs !== stats.mtimeMs ||
+      currentContent !== content
+    ) {
       // A fresh acquirer or the live holder itself replaced `path` since
       // the snapshot above -- CAS fails closed. We never clobber it.
       return false;
@@ -686,7 +718,14 @@ async function tryStealStaleLock(lockPath: string, filePath: string): Promise<bo
       ({ mtimeMs }) => Date.now() - mtimeMs > STALE_LOCK_MS,
     );
   } finally {
-    await rm(stealMutexPath, { force: true });
+    await rm(stealMutexPath, { force: true }).catch(() => {
+      // best-effort cleanup only -- must never reject and mask a successful
+      // steal (issue #84: this was the one remaining unguarded cleanup in
+      // this file, matching the exact BLOCKING 3 failure mode -- an injected
+      // EIO here previously propagated straight out of this `finally`,
+      // discarding whatever `reclaimStaleFile` had already legitimately
+      // decided, including a successful steal this process actually won).
+    });
   }
 }
 
