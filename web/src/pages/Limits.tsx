@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { setLimit, type CategoryBudget } from '../api.js';
+import { removeLimit, setLimit, type CategoryBudget } from '../api.js';
 
 export function Limits(): React.JSX.Element {
   const [category, setCategory] = useState('');
@@ -21,6 +21,10 @@ export function Limits(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<CategoryBudget | null>(null);
 
+  const [removeCategory, setRemoveCategory] = useState('');
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<CategoryBudget | null>(null);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -37,6 +41,19 @@ export function Limits(): React.JSX.Element {
       setRolloverTouched(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to set limit');
+    }
+  }
+
+  async function handleRemoveSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setRemoveError(null);
+    setRemoved(null);
+    try {
+      const budget = await removeLimit(removeCategory);
+      setRemoved(budget);
+      setRemoveCategory('');
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : 'failed to remove limit');
     }
   }
 
@@ -103,6 +120,23 @@ export function Limits(): React.JSX.Element {
           Saved: {saved.category} (rollover: {saved.rollover ? 'yes' : 'no'})
         </p>
       ) : null}
+
+      <h3>Remove limit</h3>
+      <form onSubmit={(event) => void handleRemoveSubmit(event)}>
+        <label htmlFor="limit-remove-category">Category to remove</label>
+        <input
+          id="limit-remove-category"
+          type="text"
+          value={removeCategory}
+          onChange={(event) => setRemoveCategory(event.target.value)}
+          required
+        />
+
+        {removeError !== null ? <div role="alert">{removeError}</div> : null}
+        <button type="submit">Remove limit</button>
+      </form>
+
+      {removed !== null ? <p>Removed: {removed.category}</p> : null}
     </div>
   );
 }

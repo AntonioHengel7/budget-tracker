@@ -11,7 +11,7 @@ import type { AddOptions } from '../cli/commands/add.js';
 import { removeTransaction } from '../cli/commands/rm.js';
 import { listTransactions } from '../cli/commands/list.js';
 import type { ListOptions } from '../cli/commands/list.js';
-import { setLimit } from '../cli/commands/limit.js';
+import { removeLimit, setLimit } from '../cli/commands/limit.js';
 import type { SetLimitOptions } from '../cli/commands/limit.js';
 import { getStatus } from '../cli/commands/status.js';
 import { getSummary } from '../cli/commands/summary.js';
@@ -586,6 +586,20 @@ export function createApp(config: AppConfig): Express {
       const filePath = resolveUserStorePath(config.dataDir, req.username);
       const budget = await setLimit(filePath, options);
       res.status(200).json(budget);
+    }),
+  );
+
+  api.delete(
+    '/limits/:category',
+    authed(async (req, res) => {
+      const category = req.params['category'];
+      if (typeof category !== 'string') {
+        res.status(400).json({ error: 'category is required' });
+        return;
+      }
+      const filePath = resolveUserStorePath(config.dataDir, req.username);
+      const removed = await removeLimit(filePath, category);
+      res.status(200).json(removed);
     }),
   );
 
