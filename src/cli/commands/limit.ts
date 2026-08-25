@@ -1,5 +1,6 @@
 import { createCategoryBudget } from '../../domain/budget.js';
 import type { CategoryBudget, CategoryLimitInput } from '../../domain/budget.js';
+import { ValidationError } from '../../domain/errors.js';
 import { parseAmount } from '../../domain/money.js';
 import { updateStore } from '../../storage/jsonStore.js';
 
@@ -44,5 +45,29 @@ export async function setLimit(filePath: string, options: SetLimitOptions): Prom
 
     const otherBudgets = store.budgets.filter((budget) => budget.category !== updated.category);
     return { store: { ...store, budgets: [...otherBudgets, updated] }, result: updated };
+  });
+}
+
+/**
+ * Removes a category's entire budget (all of its dated limit entries at
+ * once) from the store at `filePath`. This is whole-record removal by
+ * category, mirroring `removeTransaction`'s whole-record removal by id --
+ * not partial editing of a single dated entry within a category's limit
+ * history (see issue #83's design decision: removing and re-adding via
+ * `setLimit` is simpler and less ambiguous than identifying which single
+ * dated entry to undo).
+ */
+export async function removeLimit(filePath: string, category: string): Promise<CategoryBudget> {
+  // Load-modify-save runs under updateStore's exclusive lock (issue #9) --
+  // see add.ts for why this matters against concurrent CLI invocations.
+  return updateStore(filePath, (store) => {
+    const trimmed = category.trim();
+    const removed = store.budgets.find((budget) => budget.category === trimmed);
+    if (removed === undefined) {
+      throw new ValidationError(`no budget for category "${trimmed}"`);
+    }
+
+    const budgets = store.budgets.filter((budget) => budget.category !== trimmed);
+    return { store: { ...store, budgets }, result: removed };
   });
 }
