@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -276,6 +276,43 @@ describe('jsonStore', () => {
     await saveStore(filePath, sampleStore);
     const mode = statSync(filePath).mode & 0o777;
     expect(mode).toBe(0o600);
+  });
+
+  // Regression (#52): mkdir's { recursive: true } used no explicit mode,
+  // so the store/lock directory ended up at the default (umask-dependent,
+  // typically 0755) mode -- group/world-readable+executable, letting other
+  // local users list the directory's filenames even though they can't read
+  // the 0600 file contents. saveStore must create a freshly-created store
+  // directory at 0700, matching the file's own tightened permissions.
+  it('creates a fresh store directory with mode 0700, not the default umask-dependent mode', async () => {
+    const freshDir = join(dir, 'nested', 'store-dir');
+    const freshFilePath = join(freshDir, 'budget.json');
+
+    await saveStore(freshFilePath, sampleStore);
+
+    const mode = statSync(freshDir).mode & 0o777;
+    expect(mode).toBe(0o700);
+  });
+
+  // Regression (#52 round 2, Socrates BLOCKING 1 & 2): the round-1 fix chmod'd
+  // the store directory unconditionally on every save, even when saveStore
+  // did not create it. That silently tightened permissions on any
+  // pre-existing directory the tool doesn't own (e.g. a project checkout used
+  // as cwd), and threw EPERM on a directory the process can write to but
+  // doesn't own (mkdir recursive is a no-op there, but chmod is not). The
+  // chmod must only fire when mkdir actually created the directory.
+  it('does not chmod a pre-existing store directory it did not create', async () => {
+    const existingDir = join(dir, 'pre-existing');
+    mkdirSync(existingDir, { mode: 0o755 });
+    // Belt-and-suspenders: mkdirSync's mode is subject to umask too, so
+    // assert the starting mode explicitly is 0o755 before relying on it.
+    chmodSync(existingDir, 0o755);
+    const existingFilePath = join(existingDir, 'budget.json');
+
+    await saveStore(existingFilePath, sampleStore);
+
+    const mode = statSync(existingDir).mode & 0o777;
+    expect(mode).toBe(0o755);
   });
 
   it('a simulated write failure leaves no partial/corrupt file (atomic write via temp file + rename)', async () => {
@@ -710,6 +747,33 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
       updateStore(filePath, appendMutator(txA), { timeoutMs: 200 }),
     ).rejects.toThrow(/timed out.*lock/i);
     expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  // Regression (#52): acquireLock has its own mkdir call site (separate
+  // from saveStore's), also creating the containing directory when --file
+  // points at a not-yet-created path. It must be tightened the same way.
+  it('creates a fresh lock directory with mode 0700, not the default umask-dependent mode', async () => {
+    const freshDir = join(dir, 'nested-lock', 'store-dir');
+    const freshFilePath = join(freshDir, 'budget.json');
+
+    await updateStore(freshFilePath, appendMutator(txA));
+
+    const mode = statSync(freshDir).mode & 0o777;
+    expect(mode).toBe(0o700);
+  });
+
+  // Regression (#52 round 2, Socrates BLOCKING 1 & 2): same fix as saveStore
+  // above, applied to acquireLock's own mkdir/chmod call site.
+  it('does not chmod a pre-existing lock directory it did not create', async () => {
+    const existingDir = join(dir, 'pre-existing-lock');
+    mkdirSync(existingDir, { mode: 0o755 });
+    chmodSync(existingDir, 0o755);
+    const existingFilePath = join(existingDir, 'budget.json');
+
+    await updateStore(existingFilePath, appendMutator(txA));
+
+    const mode = statSync(existingDir).mode & 0o777;
+    expect(mode).toBe(0o755);
   });
 
   it('releases the lock even when the mutator throws, and does not persist a partial write', async () => {

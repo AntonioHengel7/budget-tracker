@@ -230,4 +230,85 @@ describe('CLI smoke test (real process invocation)', () => {
     // checking, since that \n isn't part of the (sanitized) message text.
     expect(stderr.trim()).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   });
+
+  // Regression (#55): the `add`/`rm`/`limit set` confirmation echoes are
+  // argv-sourced (the caller's own CLI input, not store content), so they're
+  // provably safe today -- but they still bypassed sanitizeCell, leaving
+  // format.ts's "every terminal-writing chokepoint sanitizes on the way out"
+  // docstring claim false. These pin that the fix actually strips a control
+  // character and a Unicode bidi-spoof character from each of the three
+  // named confirmation messages.
+  describe('argv-sourced confirmation echoes are sanitized (#55)', () => {
+    it('strips a control character and bidi-spoof character from the `add` confirmation', () => {
+      const evilCategory = 'rent\x1b[2K‮';
+      const add = runCli(['--file', filePath, 'add', '5', evilCategory, '--kind', 'expense', '--date', '2026-08-01']);
+
+      expect(add.status).toBe(0);
+      expect(add.stdout).toContain('added');
+      expect(add.stdout).toContain('rent[2K');
+      // console.log appends its own trailing newline -- trim before
+      // checking, since that \n isn't part of the (sanitized) message text.
+      expect(add.stdout.trim()).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      expect(add.stdout).not.toContain('‮');
+    });
+
+    it('strips a control character and bidi-spoof character from the `rm` confirmation', () => {
+      // `rm`'s confirmation echoes back `removed.id`, which only matches
+      // what's stored -- so to exercise a crafted id we write the store
+      // file directly (schema only requires id to be a non-empty string,
+      // see jsonStore.ts's validateStoredTransaction) rather than going
+      // through `add`, whose id is internally generated and never
+      // argv-controlled.
+      const evilId = 'txn\x1b[2K‮1';
+      writeFileSync(
+        filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          transactions: [
+            {
+              id: evilId,
+              transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: 500 },
+            },
+          ],
+          budgets: [],
+        }),
+      );
+
+      const rm = runCli(['--file', filePath, 'rm', evilId]);
+
+      expect(rm.status).toBe(0);
+      expect(rm.stdout).toContain('removed txn[2K');
+      expect(rm.stdout.trim()).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      expect(rm.stdout).not.toContain('‮');
+    });
+
+    it('strips a control character and bidi-spoof character from the `limit set` confirmation', () => {
+      const evilCategory = 'rent\x1b[2K‮';
+      const limit = runCli([
+        '--file',
+        filePath,
+        'limit',
+        'set',
+        evilCategory,
+        '100',
+        '--effective-from',
+        '2026-08',
+      ]);
+
+      expect(limit.status).toBe(0);
+      expect(limit.stdout).toContain('set limit for "rent[2K');
+      expect(limit.stdout.trim()).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      expect(limit.stdout).not.toContain('‮');
+    });
+
+    // No regression test for `summary`'s "period <value>" echo: unlike the
+    // three cases above, `--period` is validated by domain/period.ts's
+    // parsePeriod against a strict `^\d{4}-\d{2}$` pattern *before*
+    // getSummary returns, and only the untouched input is ever echoed back
+    // on success -- so a control/spoof character can never actually reach
+    // that console.log through real argv (it fails validation first, exit
+    // 1). It's still wrapped in sanitizeCell for uniformity with the other
+    // three chokepoints, but that wrap is unreachable defense-in-depth, not
+    // something a real payload can exercise.
+  });
 });
