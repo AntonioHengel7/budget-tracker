@@ -435,4 +435,47 @@ describe('web API', () => {
       expect(limited.status).toBe(429);
     });
   });
+
+  // #76: no Content-Security-Policy/X-Frame-Options, and X-Powered-By still
+  // on the wire. Asserted on an actual /api route and, separately, on the
+  // static/SPA-served path -- headers come from helmet as the very first
+  // middleware in createApp, so they must apply uniformly regardless of
+  // route or response status.
+  describe('security headers', () => {
+    it('sets a strict CSP with no unsafe-inline/unsafe-eval, X-Frame-Options: DENY, and no X-Powered-By on an API route', async () => {
+      const res = await request(app).get('/api/me');
+
+      const csp = res.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      expect(csp).toContain("script-src 'self'");
+      expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+
+      expect(res.headers['x-frame-options']).toBe('DENY');
+      expect(res.headers['x-powered-by']).toBeUndefined();
+    });
+
+    it('applies the same security headers on the static/SPA-served path', async () => {
+      const tmpWeb = await mkdtemp(join(tmpdir(), 'budget-web-headers-test-'));
+      await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
+      const staticApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        staticDir: tmpWeb,
+      });
+
+      const page = await request(staticApp).get('/some/client/route');
+      expect(page.status).toBe(200);
+
+      const csp = page.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      expect(csp).toContain("script-src 'self'");
+      expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+
+      expect(page.headers['x-frame-options']).toBe('DENY');
+      expect(page.headers['x-powered-by']).toBeUndefined();
+
+      await rm(tmpWeb, { recursive: true, force: true });
+    });
+  });
 });

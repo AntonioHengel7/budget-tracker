@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import express from 'express';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import { addTransaction } from '../cli/commands/add.js';
 import type { AddOptions } from '../cli/commands/add.js';
@@ -362,6 +363,38 @@ function isBodyParserPayloadTooLargeError(
 export function createApp(config: AppConfig): Express {
   const app = express();
   app.set('trust proxy', config.trustProxy ?? 0);
+
+  // Registered before every other middleware/route (including /healthz) so
+  // its response headers -- CSP, X-Frame-Options, and disabling X-Powered-By
+  // -- apply uniformly to every response this app ever sends. See #76.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          // helmet's defaults already give `script-src 'self'` and
+          // `object-src 'none'` with no 'unsafe-inline'/'unsafe-eval' --
+          // kept as-is. `style-src` is narrowed below because helmet
+          // defaults it to `'self' https: 'unsafe-inline'`, and this app
+          // has no inline <style> tags or React inline `style` props left
+          // (the one that existed was moved to a CSS class for #76) and no
+          // external stylesheet host, so neither allowance is needed.
+          styleSrc: ["'self'"],
+          // Stricter than helmet's default `frame-ancestors 'self'` --
+          // this app has no legitimate reason to ever be framed.
+          frameAncestors: ["'none'"],
+          // helmet includes this directive by default, which makes browsers
+          // upgrade every subresource (and some, top-level navigation) to
+          // HTTPS. This app explicitly supports local plaintext-HTTP dev
+          // (see `insecureCookies` above) and forcing HTTPS there would
+          // break it -- omitted rather than left on speculatively.
+          upgradeInsecureRequests: null,
+        },
+      },
+      // Same intent as `frame-ancestors 'none'` above, belt-and-suspenders
+      // for browsers that only honor the legacy header.
+      xFrameOptions: { action: 'deny' },
+    }),
+  );
 
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
