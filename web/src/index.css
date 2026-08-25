@@ -87,6 +87,13 @@ nav {
   border-bottom: 1px solid var(--color-border);
 }
 
+/* Pushes the "logged in as / log out" text to the far right of nav, replacing
+   what used to be a React inline `style` prop -- moved here so the app's CSP
+   (issue #76) can enforce `style-src 'self'` without `'unsafe-inline'`. */
+.nav-user {
+  margin-left: auto;
+}
+
 button {
   padding: 0.5rem 1rem;
   border: 1px solid var(--color-accent);

@@ -73,7 +73,7 @@ export function App(): React.JSX.Element {
           Limits
         </button>
         <ThemeToggle />
-        <span style={{ marginLeft: 'auto' }}>
+        <span className="nav-user">
           {auth.username} · <button type="button" onClick={() => void handleLogout()}>Log out</button>
         </span>
       </nav>
