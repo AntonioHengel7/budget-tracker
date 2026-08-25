@@ -22,7 +22,9 @@ describe('Limits rollover field', () => {
   }
 
   function fillForm(category: string, amount: string, effectiveFrom: string): void {
-    fireEvent.change(screen.getByLabelText(/category/i), { target: { value: category } });
+    // Exact match (not /category/i) -- the page also has a "Category to
+    // remove" field (#83) that a loose regex would ambiguously also match.
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: category } });
     fireEvent.change(screen.getByLabelText(/amount/i), { target: { value: amount } });
     fireEvent.change(screen.getByLabelText(/effective from/i), { target: { value: effectiveFrom } });
   }
@@ -86,7 +88,7 @@ describe('Limits rollover field', () => {
 
     // Switch to a different category and submit again without touching the
     // checkbox at all -- the checkbox must visually reset too.
-    fireEvent.change(screen.getByLabelText(/category/i), { target: { value: 'rent' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'rent' } });
     expect(screen.getByLabelText(/rollover unspent balance/i)).not.toBeChecked();
     submit();
 
@@ -123,7 +125,7 @@ describe('Limits rollover field', () => {
     // Switch to a different category without touching the checkbox. The
     // post-submit reset never ran (the submit failed), so only the
     // category-change reset can clear `rolloverTouched` here.
-    fireEvent.change(screen.getByLabelText(/category/i), { target: { value: 'rent' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'rent' } });
     expect(screen.getByLabelText(/rollover unspent balance/i)).not.toBeChecked();
     submit();
 

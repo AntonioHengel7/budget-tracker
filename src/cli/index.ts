@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import { addTransaction } from './commands/add.js';
 import { removeTransaction } from './commands/rm.js';
 import { listTransactions } from './commands/list.js';
-import { setLimit } from './commands/limit.js';
+import { removeLimit, setLimit } from './commands/limit.js';
 import { getStatus } from './commands/status.js';
 import { getSummary } from './commands/summary.js';
 import { formatAmount, formatPercent, formatSignedAmount, formatTable, sanitizeCell } from './format.js';
@@ -152,6 +152,20 @@ limitCommand
           `set limit for "${budget.category}": ${matched ? formatAmount(matched.amountMinor) : 'n/a'} effective ${options.effectiveFrom} (rollover: ${budget.rollover})`,
         ),
       );
+    });
+  });
+
+limitCommand
+  .command('rm <category>')
+  .description('Remove a category\'s entire budget (all its dated limit entries)')
+  .action(async (category: string) => {
+    await run(async () => {
+      const filePath = resolveFilePath();
+      const removed = await removeLimit(filePath, category);
+      // category is argv the caller just typed, not store content --
+      // sanitized for the same uniform-chokepoint reason as the `add`
+      // confirmation above.
+      console.log(sanitizeCell(`removed limit for "${removed.category}"`));
     });
   });
 

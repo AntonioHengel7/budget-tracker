@@ -82,6 +82,41 @@ describe('web API', () => {
     expect(list.body).toHaveLength(1);
   });
 
+  // Covers DELETE /api/limits/:category (#83), mirroring the auth/success/
+  // not-found shape of DELETE /api/transactions/:id above.
+  describe('DELETE /api/limits/:category', () => {
+    it('rejects an unauthenticated request', async () => {
+      const res = await request(app).delete('/api/limits/groceries');
+      expect(res.status).toBe(401);
+    });
+
+    it('removes an existing category budget and returns it', async () => {
+      const agent = request.agent(app);
+      await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+      const put = await agent
+        .put('/api/limits')
+        .send({ category: 'groceries', amount: '100', effectiveFrom: '2026-08' });
+      expect(put.status).toBe(200);
+
+      const del = await agent.delete('/api/limits/groceries');
+      expect(del.status).toBe(200);
+      expect(del.body).toEqual(put.body);
+
+      const stored = JSON.parse(await readFile(join(dataDir, 'antonio.json'), 'utf-8'));
+      expect(stored.budgets).toEqual([]);
+    });
+
+    it('responds 400 for a category with no budget', async () => {
+      const agent = request.agent(app);
+      await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+      const res = await agent.delete('/api/limits/nope');
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('nope');
+    });
+  });
+
   it('ignores a client-supplied username/userId in the request body -- data is always scoped by the session, never by client input', async () => {
     const agent = request.agent(app);
     await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });

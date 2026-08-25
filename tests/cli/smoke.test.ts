@@ -78,6 +78,21 @@ describe('CLI smoke test (real process invocation)', () => {
     expect(stored.budgets).toHaveLength(1);
   });
 
+  it('limit rm removes a category\'s budget end-to-end and errors on an unknown category', () => {
+    const set = runCli(['--file', filePath, 'limit', 'set', 'groceries', '100', '--effective-from', '2026-08']);
+    expect(set.status).toBe(0);
+
+    const rm = runCli(['--file', filePath, 'limit', 'rm', 'groceries']);
+    expect(rm.status).toBe(0);
+    expect(rm.stdout).toContain('removed limit for "groceries"');
+
+    const stored = JSON.parse(readFileSync(filePath, 'utf-8'));
+    expect(stored.budgets).toEqual([]);
+
+    const rmAgain = runCli(['--file', filePath, 'limit', 'rm', 'groceries']);
+    expect(rmAgain.status).toBe(1);
+  });
+
   it('exits 0 and picks up BUDGET_FILE + defaults --date/--period to today/this-month when omitted', () => {
     const today = localTodayIsoDate();
 

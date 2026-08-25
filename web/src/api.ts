@@ -182,6 +182,10 @@ export function setLimit(input: SetLimitInput): Promise<CategoryBudget> {
   return request('/api/limits', { method: 'PUT', body: JSON.stringify(input) });
 }
 
+export function removeLimit(category: string): Promise<CategoryBudget> {
+  return request(`/api/limits/${encodeURIComponent(category)}`, { method: 'DELETE' });
+}
+
 export function getStatus(period?: string): Promise<PeriodBudgetStatus[]> {
   const query = period !== undefined ? `?period=${encodeURIComponent(period)}` : '';
   return request(`/api/status${query}`);
