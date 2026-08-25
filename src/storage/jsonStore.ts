@@ -250,12 +250,46 @@ export async function loadStore(filePath: string): Promise<PersistedStore> {
 }
 
 /**
+ * Thrown by `updateStore`'s fencing check (passed to `saveStore` as
+ * `beforeCommit`) when the lock this caller acquired no longer matches what
+ * is currently on disk at its lock path -- i.e. it was stolen since
+ * acquisition. Never surfaced to callers of `updateStore` directly: caught
+ * internally to trigger a bounded retry of the whole load-modify-save cycle
+ * (see `updateStore`). Kept distinct from `StorageError` so `saveStore`'s own
+ * catch block -- which wraps any other failure in a `StorageError` -- can
+ * recognize and pass this through unwrapped instead, the same way
+ * `acquireLock` already passes through `StorageError`s it doesn't want to
+ * re-wrap behind a generic label.
+ */
+class LockStolenError extends Error {
+  constructor() {
+    super('lock was stolen before the write could commit');
+    this.name = 'LockStolenError';
+  }
+}
+
+/**
  * Saves `store` to `filePath` atomically: writes to a temp file in the same
  * directory, then renames over the target. The real path is never written to
  * directly, so a failure mid-write can never leave a partial/corrupt file at
  * `filePath`. The final file is chmod'd 0600.
+ *
+ * `options.beforeCommit`, if given, runs as the very last step before the
+ * rename that actually makes this write externally visible -- this is where
+ * `updateStore` plugs in its lock-fencing check (issue #51 round 4): re-verify
+ * the caller still holds the lock it acquired, immediately before the point
+ * of no return, rather than trying (and, across three prior rounds, failing)
+ * to make the lock-steal race itself impossible. If `beforeCommit` throws a
+ * `LockStolenError`, that is propagated as-is (not wrapped) so
+ * `updateStore` can distinguish "abort and retry" from a genuine save
+ * failure; the temp file is still cleaned up on that path exactly like any
+ * other failure here.
  */
-export async function saveStore(filePath: string, store: PersistedStore): Promise<void> {
+export async function saveStore(
+  filePath: string,
+  store: PersistedStore,
+  options: { beforeCommit?: () => Promise<void> } = {},
+): Promise<void> {
   const dir = dirname(filePath);
   const tempPath = join(dir, `.${basename(filePath)}.${randomUUID()}.tmp`);
   const json = JSON.stringify(store, null, 2);
@@ -272,11 +306,23 @@ export async function saveStore(filePath: string, store: PersistedStore): Promis
     // no group/other bits to clear. chmod explicitly anyway so the "saved
     // file has mode 0600" guarantee doesn't depend on umask behavior at all.
     await chmod(tempPath, 0o600);
+    if (options.beforeCommit) {
+      await options.beforeCommit();
+    }
     await rename(tempPath, filePath);
   } catch (err) {
     await rm(tempPath, { force: true }).catch(() => {
       // best-effort cleanup only -- the original error below is what matters
     });
+    if (err instanceof LockStolenError || err instanceof StorageError) {
+      // Already a precise, purpose-built error (a fencing abort, or a
+      // StorageError raised by beforeCommit itself) -- propagate it as-is
+      // instead of re-wrapping it behind a generic "failed to save" label
+      // that would obscure which operation actually failed. Mirrors the
+      // same pattern in `acquireLock` for `StorageError`s it doesn't
+      // re-wrap.
+      throw err;
+    }
     throw new StorageError(`failed to save store file "${filePath}": ${(err as Error).message}`, {
       cause: err,
     });
@@ -312,71 +358,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * How long a `.steal` meta-mutex (see `atomicSteal`/`acquireStealMutex`
- * below) is trusted as "still legitimately being created" when its content
- * can't be parsed into a pid. Its only legitimate writer does a single
- * `handle.writeFile()` of a few bytes immediately after `open('wx')`
- * succeeds -- nothing legitimate ever takes anywhere close to this long to
- * finish that. Used only as a fallback for the narrow window between a
- * writer's `open('wx')` and its `writeFile` landing (see `acquireStealMutex`);
- * once content *is* parseable, pid liveness (immediate, not time-based)
- * takes over.
- */
-const STEAL_MUTEX_GRACE_MS = 5_000;
-
-/**
- * Unconditional, finite ceiling on how long `isStealMutexReclaimable`'s
- * parseable-pid branch is allowed to keep saying "still alive, do not
- * reclaim" before a time-based backstop overrides it regardless.
- *
- * Regression (Hobbes, PR #82 round 2 BLOCKING 1): that branch used to have
- * no such backstop at all -- `process.kill(pid, 0)` reading "alive" made a
- * `.steal` mutex permanently unreclaimable, full stop. That is not
- * theoretical here: `entrypoint.sh` runs `exec su-exec node "$@"`, so node
- * is PID 1 inside the Fly container -- every `.steal` file this app itself
- * writes contains pid `1`, and PID 1 reads as alive after every restart,
- * forever, on a `/data` volume that persists across `auto_stop_machines`
- * cycles. A reused pid owned by a different user wedges the same way, since
- * `isProcessAlive` conservatively maps EPERM to "alive" too. Pid liveness is
- * still useful -- it lets a mutex be reclaimed *sooner* than a time-only
- * check would -- but it must never be the *only* thing standing between an
- * orphaned mutex and a permanent write-DoS. Set well above
- * `STEAL_MUTEX_GRACE_MS`: this only ever matters for the parseable-pid
- * branch, since nothing legitimate holds this mutex anywhere close to a
- * minute (it's a handful of fast fs calls).
- */
-const MAX_STEAL_MUTEX_AGE_MS = 60_000;
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    // Signal 0: no signal is actually sent; the OS still validates the pid
-    // and reports whether it could be signaled at all.
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (isErrnoException(err) && err.code === 'ESRCH') {
-      return false;
-    }
-    // EPERM (alive, owned by another user) or anything else unexpected:
-    // treat conservatively as alive -- never steal a mutex we can't prove
-    // is dead.
-    return true;
-  }
-}
-
-/**
- * Atomically reclaims `path` (the main lock file, or its own `.steal`
- * meta-mutex) if, and only if, what is physically there *right now* is
- * still judged reclaimable -- without ever making `path` observably vacant.
- *
- * Three designs were tried and rejected before this one, each proven unsafe
- * by actually reproducing the failure, not just reasoned about in the
- * abstract. That history is kept here in full, on purpose: an earlier round
- * of this file deleted an equivalent rejection rationale and the rejected
- * design shipped again anyway one round later.
+ * History of designs tried, and rejected, for stealing an abandoned lock
+ * file -- kept here in full, on purpose, across every round: an earlier
+ * round of this file deleted an equivalent rejection rationale and the
+ * rejected design shipped again anyway one round later.
  *
  * 1. (Round 1) "Write a unique token to a temp file, `rename()` it onto
  *    `path`, then read `path` back and confirm it's still our token." Not
@@ -389,8 +374,8 @@ function isProcessAlive(pid: number): boolean {
  *    lock in the gap between the `lstat` and the `rm` -- the `rm` then
  *    deletes that new caller's live lock based on stale information, and
  *    the steal proceeds to also acquire. Two live holders.
- * 3. (Round 2, shipped, then reverted here) "`rename(path, tombstonePath)`
- *    to atomically detach whatever is at `path`, judge staleness from the
+ * 3. (Round 2, shipped, then reverted) "`rename(path, tombstonePath)` to
+ *    atomically detach whatever is at `path`, judge staleness from the
  *    detached snapshot, and -- if it turns out not to have been stale --
  *    `link()` it back onto `path`." This closed (1) and (2), but introduced
  *    a new problem review caught independently from two directions (PR #82
@@ -404,329 +389,214 @@ function isProcessAlive(pid: number): boolean {
  *    holder is still live, giving two simultaneous holders and, via the
  *    tombstone cleanup, silently deleting the *new* holder's only remaining
  *    link to its own lock.
+ * 4. (Round 3, shipped, then reverted here) Never detach `path`; instead use
+ *    filesystem identity (device + inode), last-modified instant, and exact
+ *    content as a read-then-compare-and-swap token for the one moment
+ *    `path` actually changes, guarded by a `${lockPath}.steal` meta-mutex
+ *    (itself acquired the same way) that serialized *stealers* against each
+ *    other. This closed the round-2 vacancy problem, but round 4 review
+ *    (Socrates, verified by execution + mutation testing, not just reading)
+ *    proved it still is not real mutual exclusion: `rename()` is not
+ *    exclusive, it cannot fail on a "busy" target, so two racers who both
+ *    read the *same unchanged pre-state* before either renames can *both*
+ *    pass the CAS and *both* successfully `rename` -- both then believe
+ *    they hold whatever they just renamed onto. Reproduced empirically:
+ *    seeding a stale lock + an orphaned `.steal` meta-mutex and running
+ *    concurrent `updateStore` calls under this file's jitter-fault-injection
+ *    test harness lost up to 8/20 writes silently (no error surfaced). Worse,
+ *    the `.steal` mutex was added specifically to serialize stealers around
+ *    this weakness, but it hands *itself* out through the exact same flawed
+ *    primitive in its own orphaned-mutex-reclaim branch -- the bug simply
+ *    recurses one level up, onto the mutex meant to prevent it. Switching
+ *    the grant from `rename` to `unlink`-then-`open('wx')` does not fully
+ *    close this either for that same orphaned-mutex-reclaim case: with no
+ *    arbiter above it, two racers can still interleave `unlink` and
+ *    `open('wx')` such that a straggler's `unlink` deletes a rival's
+ *    already-successful fresh claim, and the straggler's own subsequent
+ *    `open('wx')` then succeeds against the vacancy it just created -- same
+ *    double-grant, just via a different sequence. This is structural: POSIX
+ *    has no atomic "delete this directory entry only if it still refers to
+ *    inode X" syscall, so no amount of refining the CAS *check* can make an
+ *    unconditional-delete-based grant safe when an unbounded number of
+ *    independent processes can each decide to steal concurrently with no
+ *    serializing arbiter.
  *
- * The fix: never detach `path` at all, and use filesystem identity
- * (device + inode), last-modified instant, and exact content -- not a
- * moments-old decision -- as the compare-and-swap token for the one moment
- * `path` actually changes:
+ * Round 4's fix is a different strategy entirely, not another patch on the
+ * same one: stop trying to prevent the acquire-time steal race from ever
+ * producing two processes that each *believe* they hold the lock -- that
+ * has now failed four times running, for a structural reason no CAS
+ * refinement can close. Instead, make that belief cheap to hold and
+ * harmless to be wrong about:
  *
- * 1. Read `path`'s current stats and content directly, in place. `path` is
- *    never touched by this -- reads are inherently safe to do concurrently
- *    with anything else, so there is no vacancy window on this branch,
- *    structurally, not by chance of timing.
- * 2. If `isStillReclaimable` says no, we are done -- return `false`.
- *    Nothing was ever removed or replaced, so there is nothing to restore.
- * 3. If yes, write the replacement content into a private temp file (again,
- *    `path` itself still untouched), then re-`lstat` and re-`readFile`
- *    `path` by name one last time, right before the swap. If its
- *    `(dev, ino, mtimeMs, content)` no longer exactly matches what was read
- *    in step 1, some other holder or acquirer has since replaced `path` --
- *    back off (`false`) instead of clobbering whatever is there now.
- * 4. Only if every one of those still matches do we `rename(tempPath,
- *    path)` -- POSIX guarantees this is atomic and, critically, `path` is
- *    *never* missing at any point: it holds the old file right up until the
- *    instant the rename lands the new one.
+ * - The steal itself goes back to the simplest possible sequence -- best-
+ *   effort `rm` of the stale lock, then `open(lockPath, 'wx')` to claim it
+ *   (see `stealStaleLock`/`tryCreateLockFile` below). No meta-mutex, no
+ *   temp-file CAS. Two racers *can* end up both believing they hold the
+ *   lock, exactly as in the failure mode above -- this is now allowed.
+ * - Every lock acquisition (ordinary or steal) captures its filesystem
+ *   identity `(dev, ino)` via `handle.stat()` on the still-open handle (see
+ *   `LockHandle`) -- not a separate by-name `lstat`, which would reopen a
+ *   TOCTOU gap between "the file we just created" and "the file currently
+ *   at that path".
+ * - `updateStore` re-verifies, as the very last step before the write
+ *   actually commits (immediately before `saveStore`'s internal rename --
+ *   see `saveStore`'s `beforeCommit` hook), that the lock's *current*
+ *   on-disk identity still matches what was captured at acquire time. A
+ *   mismatch (or the lock simply being gone) means it was stolen since
+ *   acquisition; the write is aborted (never committed) and the whole
+ *   load-modify-save cycle is retried, bounded by the same `timeoutMs`
+ *   deadline the call already had.
+ * - `releaseLock` is identity-checked too (see `currentLockIdentityMatches`):
+ *   it only removes the lock file if its current identity still matches
+ *   what this caller captured at acquire time, never blindly whatever is
+ *   currently there. If this caller was stolen from, releasing is a no-op.
  *
- * The gap between step 3's identity check and step 4's rename is not a true
- * hardware compare-and-swap (Node's `fs` module has no exchange-on-rename
- * primitive to close it completely), but it can no longer reproduce the
- * resurrection or double-hold failures above: the only two things that can
- * happen in that gap are (a) nothing changes and the rename proceeds
- * correctly, or (b) `path`'s identity changes again, which the *next*
- * caller's own read-then-check catches on its own next attempt. `path` is
- * at all times either the old file or the new one -- never absent, and
- * never judged from a copy that has drifted out of sync with what is
- * actually there.
+ * Trace the exact round-4 failure mode above through this design: P1 and P2
+ * both see the same stale lock, both `rm`+`open('wx')`. If P1's `open`
+ * succeeds first and P2's `rm` then executes before P2's own `open`, P2
+ * will delete P1's fresh lock and then successfully create its own -- both
+ * P1 and P2 now *believe* they hold the lock. This is allowed to happen; it
+ * is no longer a correctness bug. When P1 eventually reaches its fencing
+ * check, it will see the lock's current identity is P2's inode, not P1's --
+ * P1 aborts without writing and retries. P2, unaware anything happened,
+ * proceeds normally, writes, and releases correctly (identity-checked,
+ * matches its own capture). No write is ever lost; P1 simply loses a round
+ * and retries once P2's (now genuinely live, fresh) lock is released.
  *
- * Why `(dev, ino)` alone is not enough (CI-only regression against PR #82
- * round 2 BLOCKING 2's own regression test, not reproducible on macOS/APFS
- * locally, root-caused by re-running that test with temporary instrumentation
- * logging the actual stat values on both sides of the check): every writer
- * that can ever occupy `path` -- an ordinary acquirer's `open(path, 'wx')`,
- * and this function's own `rename(tempPath, path)` -- does so only after the
- * previous occupant's directory entry is already gone, i.e. after an
- * `unlink`. Some filesystems' inode allocators (observed in CI; APFS's
- * monotonic catalog-ID allocation does not do this, which is why this could
- * not be reproduced locally) can hand the very next `open(..., 'wx')` after
- * an `unlink` the *same* inode number just freed, purely by allocator
- * coincidence -- a classic ABA: a brand new, unrelated live lock can end up
- * with the exact `(dev, ino)` the just-stolen stale lock had, with nothing
- * to do with actually being the same file. `mtimeMs` and `content` close
- * this at zero extra cost on the read-in-step-1 side (both are already
- * captured there for `isStillReclaimable`) and one extra `readFile` on the
- * read-in-step-3 side: a file that did not exist a moment ago cannot share
- * the old file's exact last-modified instant, and an ordinary acquirer's
- * fresh lock (or another racer's steal) never happens to hold byte-for-byte
- * the same content the stale file had.
- *
- * Every exit path -- success, "not reclaimable", CAS failure, or an
- * unexpected throw -- cleans up the private temp file exactly once, guarded
- * so a failing cleanup can never mask an already-successful steal
- * (regression, Socrates, PR #82 round 2 BLOCKING 3: the equivalent tombstone
- * cleanup in the round 2 design was the one *unguarded* cleanup in this
- * file, and an injected EIO on it discarded a successful steal's `true`
- * return, wedging a lock this process actually held for the full
- * STALE_LOCK_MS).
+ * The residual gap between the fencing check and the write actually landing
+ * (and the identical gap in `releaseLock`'s own check-then-`rm`) is the same
+ * class of inherent, non-closable-via-Node's-`fs` gap round 3 already
+ * accepted for its own check-then-`rename` gap (Node has no atomic "act only
+ * if identity X still holds" primitive at all) -- it is not glossed over
+ * here either. The fencing check closes the *acquire-time* steal race this
+ * design targets: it catches a theft that happened at any point before the
+ * check itself runs. It does not, and cannot, catch a theft that lands
+ * strictly *after* the check has already passed but before the write it
+ * guards actually commits -- that narrow window is a genuinely open, accepted
+ * residual, not something the *next* fencing check retroactively closes for
+ * the write already in flight when it opened. What bounds the damage is
+ * that any inconsistency it produces is itself just another instance of the
+ * same acquire-time race, so it is in turn caught by whichever fencing check
+ * (this caller's own retry, or a would-be victim's own commit-time check)
+ * next observes it -- the residual is narrow and self-limiting, not closed.
  */
-async function reclaimStaleFile(
-  path: string,
-  filePath: string,
-  isStillReclaimable: (info: { content: string; mtimeMs: number }) => boolean,
-): Promise<boolean> {
-  let stats;
-  let content: string;
-  try {
-    [stats, content] = await Promise.all([lstat(path), readFile(path, 'utf-8')]);
-  } catch (err) {
-    if (isErrnoException(err) && err.code === 'ENOENT') {
-      // Already released (or reclaimed by someone else) since the caller's
-      // own staleness check -- nothing to steal; its normal retry loop
-      // handles this.
-      return false;
-    }
-    throw new StorageError(
-      `failed to inspect "${path}" for store file "${filePath}": ${(err as Error).message}`,
-      { cause: err },
-    );
-  }
 
-  if (!isStillReclaimable({ content, mtimeMs: stats.mtimeMs })) {
-    // Live (or not old enough yet) -- `path` was never touched, so there is
-    // nothing to restore; just decline to steal it.
-    return false;
-  }
-
-  const tempPath = `${path}.${process.pid}.${randomUUID()}.steal-tmp`;
-  let tempCreated = false;
-  try {
-    const handle = await open(tempPath, 'wx', 0o600);
-    tempCreated = true;
-    try {
-      await handle.writeFile(`${process.pid}\n`, 'utf-8');
-    } finally {
-      await handle.close();
-    }
-
-    // Compare-and-swap: only replace `path` if it still identifies the
-    // exact file judged stale above. `lstat`, not `stat` -- the identity
-    // check is about the directory entry itself, matching how staleness is
-    // judged everywhere else in this file. `(dev, ino)` alone is not a
-    // strong enough token -- see the ABA-via-inode-reuse note in this
-    // function's doc comment -- so `mtimeMs` and `content` (both already
-    // read once in step 1, at no extra cost there) are re-read and compared
-    // too.
-    let current;
-    let currentContent: string;
-    try {
-      [current, currentContent] = await Promise.all([lstat(path), readFile(path, 'utf-8')]);
-    } catch (err) {
-      if (isErrnoException(err) && err.code === 'ENOENT') {
-        // Released, with nobody holding it right now -- decline rather than
-        // race a not-yet-visible concurrent creator; the caller's normal
-        // open('wx') claims it cleanly on the next loop iteration.
-        return false;
-      }
-      throw err;
-    }
-
-    if (
-      current.dev !== stats.dev ||
-      current.ino !== stats.ino ||
-      current.mtimeMs !== stats.mtimeMs ||
-      currentContent !== content
-    ) {
-      // A fresh acquirer or the live holder itself replaced `path` since
-      // the snapshot above -- CAS fails closed. We never clobber it.
-      return false;
-    }
-
-    await rename(tempPath, path);
-    tempCreated = false; // renamed away -- nothing left at tempPath to clean up
-    return true;
-  } catch (err) {
-    throw new StorageError(
-      `failed to steal "${path}" for store file "${filePath}": ${(err as Error).message}`,
-      { cause: err },
-    );
-  } finally {
-    if (tempCreated) {
-      await rm(tempPath, { force: true }).catch(() => {
-        // best-effort cleanup only -- see the BLOCKING 3 regression note
-        // above for why this must never reject.
-      });
-    }
-  }
+/**
+ * Filesystem identity of a claimed lock file, captured at acquire time.
+ * `(dev, ino)` alone is not sufficient: on Linux (this app's actual Fly
+ * deployment, ext4; also `ubuntu-latest` CI), an unlinked inode can be
+ * handed straight back to the very next `open('wx')` in the same directory
+ * -- so after `stealStaleLock`'s `rm` + `open('wx')`, a completely different
+ * process's fresh lock can end up with the exact same `(dev, ino)` this
+ * caller captured for the lock it lost. `token` -- a `randomUUID()` minted
+ * fresh per acquisition and written into the lock file's own content (see
+ * `tryCreateLockFile`) -- is the actual discriminator: a `randomUUID()`
+ * collision between two independent acquisitions is not a realistic risk,
+ * unlike inode or pid reuse (this file's own history already notes pid
+ * content collides under PID 1 in the Fly container, which is why the pid
+ * written alongside it is a human-debugging breadcrumb only, never
+ * compared).
+ */
+interface LockIdentity {
+  readonly dev: number;
+  readonly ino: number;
+  readonly token: string;
 }
 
-function isStealMutexReclaimable({
-  content,
-  mtimeMs,
-}: {
-  content: string;
-  mtimeMs: number;
-}): boolean {
-  if (Date.now() - mtimeMs > MAX_STEAL_MUTEX_AGE_MS) {
-    // Unconditional time backstop -- see MAX_STEAL_MUTEX_AGE_MS above. Pid
-    // liveness below can only make reclaim happen *sooner* than this; it
-    // must never be the only path to reclaiming an orphaned mutex.
-    return true;
-  }
-  const holderPid = Number.parseInt(content, 10);
-  if (Number.isInteger(holderPid) && holderPid > 0) {
-    return !isProcessAlive(holderPid);
-  }
-  // Empty/malformed content: either genuinely orphaned mid-creation (a
-  // writer that crashed between its `open('wx')` and its `writeFile`), or,
-  // very briefly, a legitimate writer that hasn't finished that single
-  // write yet. Fall back to a short, generous grace period rather than
-  // either permanently refusing to reclaim it or reclaiming a
-  // still-being-created file out from under its rightful creator.
-  return Date.now() - mtimeMs > STEAL_MUTEX_GRACE_MS;
+/** A successfully claimed lock: its path, plus the identity it was claimed with. */
+interface LockHandle {
+  readonly lockPath: string;
+  readonly identity: LockIdentity;
 }
 
 /**
- * Acquires `${lockPath}.steal`, a small, always-briefly-held meta-mutex that
- * serializes stale-lock steal *attempts* against `lockPath` across all
- * racers (see `tryStealStaleLock`), creating it fresh via exclusive
- * `open('wx')` -- or, if another holder's pid is provably dead (or its
- * content is old enough that nothing legitimate could still be mid-write,
- * or it has simply existed longer than any pid-liveness check should ever
- * be trusted for), atomically reclaiming it via `reclaimStaleFile`.
- *
- * Regression (issue #51 follow-up, review BLOCKING #1): the very first
- * version of this meta-mutex had no recovery path of its own at all -- if
- * its holder crashed (or any other error path skipped its cleanup) before
- * releasing it, every future `acquireLock` call would hit EEXIST on it
- * forever, across restarts, with no way out. That's exactly the permanent-
- * deadlock failure mode `STALE_LOCK_MS` exists to prevent for the main
- * lock, reintroduced one level up. This mutex gets the same
- * steal-when-abandoned treatment as the main lock, via the same
- * `reclaimStaleFile` primitive -- gated primarily on pid liveness
- * (immediate, since nothing legitimate ever holds this mutex for more than
- * a handful of fast fs calls), backstopped by `MAX_STEAL_MUTEX_AGE_MS` so
- * pid liveness alone can never make it unreclaimable forever (round 2
- * BLOCKING 1).
+ * Extracts the `randomUUID()` fencing token from a lock file's content
+ * (issue #51: see the `LockIdentity` doc comment for why `(dev, ino)` alone
+ * is defeatable by inode reuse). Content is written as `${pid}\n${token}\n`
+ * by `tryCreateLockFile` -- the pid line is a human-debugging breadcrumb
+ * only and is never compared. Content that doesn't match this shape (e.g. a
+ * lock file some other process/tool dropped at that path) simply yields no
+ * token, which -- compared against any real captured identity -- is just
+ * another form of mismatch, the same as a missing file or a different
+ * token.
  */
-async function acquireStealMutex(stealMutexPath: string, filePath: string): Promise<boolean> {
-  let created = false;
-  try {
-    const handle = await open(stealMutexPath, 'wx', 0o600);
-    created = true;
-    try {
-      await handle.writeFile(`${process.pid}\n`, 'utf-8');
-    } finally {
-      await handle.close();
-    }
-    return true;
-  } catch (err) {
-    if (created) {
-      // We created the file but failed to fully commit our write to it --
-      // never leave an indeterminate-content mutex file behind.
-      await rm(stealMutexPath, { force: true }).catch(() => {
-        // best-effort cleanup only
-      });
-    }
-    if (!isErrnoException(err) || err.code !== 'EEXIST') {
-      throw new StorageError(
-        `failed to acquire steal-mutex for store file "${filePath}": ${(err as Error).message}`,
-        { cause: err },
-      );
-    }
-  }
+function parseLockToken(content: string): string | null {
+  const token = content.split('\n')[1]?.trim();
+  return token ? token : null;
+}
 
-  // Contended -- cheap gate before ever touching the mutex file: read its
-  // current holder and only attempt the heavier `reclaimStaleFile` reclaim
-  // if it's provably reclaimable. This keeps the overwhelmingly common
-  // case -- the mutex genuinely held by a live racer for a few
-  // milliseconds -- a single cheap read with zero churn on the mutex file.
-  let stats;
-  let content: string;
+/**
+ * Attempts to atomically create `lockPath` via exclusive `open(..., 'wx')`,
+ * capturing its filesystem identity via `handle.stat()` -- an fstat on the
+ * still-open handle, not a separate by-name `lstat`, which would reopen a
+ * TOCTOU gap between "the file we just created" and "the file currently at
+ * that path" -- before writing a fresh `randomUUID()` fencing token (plus a
+ * best-effort pid breadcrumb) and closing. Returns `null` on `EEXIST`
+ * (someone else holds, or just claimed, the path) so the caller can fall
+ * back to its normal poll/retry logic; any other failure is a
+ * `StorageError`.
+ */
+async function tryCreateLockFile(lockPath: string, filePath: string): Promise<LockHandle | null> {
+  let handle;
   try {
-    [stats, content] = await Promise.all([
-      lstat(stealMutexPath),
-      readFile(stealMutexPath, 'utf-8'),
-    ]);
+    handle = await open(lockPath, 'wx', 0o600);
   } catch (err) {
-    if (isErrnoException(err) && err.code === 'ENOENT') {
-      // Released between our open() and this read -- caller's normal poll
-      // loop retries shortly.
-      return false;
+    if (isErrnoException(err) && err.code === 'EEXIST') {
+      return null;
     }
     throw new StorageError(
-      `failed to inspect steal-mutex for store file "${filePath}": ${(err as Error).message}`,
+      `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
       { cause: err },
     );
   }
 
-  if (!isStealMutexReclaimable({ content, mtimeMs: stats.mtimeMs })) {
-    // Genuinely still held by a live racer -- back off without touching it.
-    return false;
+  try {
+    const stats = await handle.stat();
+    const token = randomUUID();
+    // pid line is a best-effort breadcrumb for a human debugging a stuck
+    // lock; never relied on programmatically. The token line is the actual
+    // fencing discriminator -- see the LockIdentity doc comment.
+    await handle.writeFile(`${process.pid}\n${token}\n`, 'utf-8');
+    return { lockPath, identity: { dev: stats.dev, ino: stats.ino, token } };
+  } catch (err) {
+    throw new StorageError(
+      `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  } finally {
+    // A failing close() must never discard an already-successful
+    // acquisition (issue #51, Socrates BLOCKING): by this point open+stat
+    // +writeFile have all already succeeded, so the lock file legitimately
+    // exists on disk and is legitimately ours. If close() itself then
+    // rejects (e.g. a real/injected EIO on the fd), letting that rejection
+    // escape here would replace the successful return value above with a
+    // raw, non-StorageError exception -- and leave that legitimately-ours
+    // lock file orphaned on disk with nothing tracking it, wedging every
+    // future acquirer against it for the full STALE_LOCK_MS. Best-effort
+    // only, matching this file's other guarded cleanups.
+    await handle.close().catch(() => {});
   }
-
-  // The cheap gate says reclaimable, but that snapshot is already moments
-  // old -- `reclaimStaleFile` re-verifies against a fresh read (and, at
-  // swap time, a fresh identity check) before actually acting.
-  return reclaimStaleFile(stealMutexPath, filePath, isStealMutexReclaimable);
 }
 
 /**
- * Attempts to steal a lock file that has just been judged stale.
- *
- * Regression (issue #51): the original steal was a plain "check age, then
- * `rm`" -- not atomic w.r.t. other stealers racing the same check. That let
- * this happen: P1 sees the lock is stale, `rm`s it, loops back, and creates
- * a fresh live lock via `open('wx')`. P2, already past its own staleness
- * check on the *old* mtime (i.e. before P1 acted), then `rm`s what it still
- * believes is the stale lock -- but that unconditional `rm` actually deletes
- * P1's brand-new live lock. A third acquirer (or P2 itself, next loop) can
- * now acquire the lock while P1 believes it still holds it and is mid-write:
- * the exact lost-update race #9's locking was built to close, just narrowed
- * to the window right after a stale-lock steal.
- *
- * Closing this needs two distinct things, both provided by
- * `acquireStealMutex` + `reclaimStaleFile` above:
- *
- * - Other *stealers* racing the same stale lock must be excluded from each
- *   other, so one stealer can never clobber another stealer's already-won
- *   fresh lock. `acquireStealMutex` does this: only one racer is ever inside
- *   the block below for a given `lockPath` at a time.
- * - Even with only one stealer active, it must never act on a moments-old
- *   staleness *decision*, nor ever make `lockPath` observably vacant while
- *   deciding -- an ordinary (non-stealing) acquirer, or the original
- *   holder's own release, can happen at any instant (review BLOCKING #3
- *   from round 1, and BLOCKING #1/#2 from round 2, each reproduced
- *   directly). `reclaimStaleFile` closes this by never detaching
- *   `lockPath` and only ever swapping it via an identity-checked
- *   compare-and-swap immediately before the one atomic `rename` that can
- *   change it.
+ * Attempts to steal a lock file that has just been judged stale (issue #51,
+ * round 4 -- see the design history above for why this is deliberately the
+ * simplest possible sequence, with no meta-mutex and no CAS): best-effort
+ * clear it, then race to claim the vacancy via `open('wx')`. Two racers can
+ * interleave here such that a straggler's `rm` deletes a rival's
+ * already-successful fresh claim, and the straggler's own `open('wx')` then
+ * succeeds against the vacancy it just created -- that is allowed; it is
+ * made harmless by `updateStore`'s commit-time fencing check and
+ * `releaseLock`'s identity check, not prevented here.
  */
-async function tryStealStaleLock(lockPath: string, filePath: string): Promise<boolean> {
-  const stealMutexPath = `${lockPath}.steal`;
-
-  const acquiredMutex = await acquireStealMutex(stealMutexPath, filePath);
-  if (!acquiredMutex) {
-    // Another racer is already mid-steal against this lockPath (or we lost
-    // a steal-mutex reclaim race to one) -- back off, the caller's normal
-    // poll loop retries shortly.
-    return false;
-  }
-
-  try {
-    return await reclaimStaleFile(
-      lockPath,
-      filePath,
-      ({ mtimeMs }) => Date.now() - mtimeMs > STALE_LOCK_MS,
-    );
-  } finally {
-    await rm(stealMutexPath, { force: true }).catch(() => {
-      // best-effort cleanup only -- must never reject and mask a successful
-      // steal (issue #84: this was the one remaining unguarded cleanup in
-      // this file, matching the exact BLOCKING 3 failure mode -- an injected
-      // EIO here previously propagated straight out of this `finally`,
-      // discarding whatever `reclaimStaleFile` had already legitimately
-      // decided, including a successful steal this process actually won).
-    });
-  }
+async function stealStaleLock(lockPath: string, filePath: string): Promise<LockHandle | null> {
+  await rm(lockPath, { force: true }).catch(() => {
+    // Best-effort clear only. If this races a concurrent steal/release and
+    // loses (or the file is already gone), the open('wx') below simply
+    // fails EEXIST and this attempt cleanly falls through to the caller's
+    // normal poll/retry loop, exactly as if the lock had still been live.
+  });
+  return tryCreateLockFile(lockPath, filePath);
 }
 
 /**
@@ -742,10 +612,11 @@ async function tryStealStaleLock(lockPath: string, filePath: string): Promise<bo
  * proceeding without the lock -- a loud, clear failure instead of silently
  * racing the other writer and possibly losing its update. A lock file older
  * than STALE_LOCK_MS is assumed to belong to a crashed holder and is stolen
- * -- atomically, via `tryStealStaleLock` (issue #51) -- rather than waited
- * out.
+ * via `stealStaleLock` (issue #51) rather than waited out; see the design
+ * history above for why the resulting lock's identity, not just its path,
+ * is what actually matters now.
  */
-async function acquireLock(filePath: string, timeoutMs: number): Promise<string> {
+async function acquireLock(filePath: string, timeoutMs: number): Promise<LockHandle> {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + timeoutMs;
 
@@ -754,23 +625,9 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
   await mkdir(dirname(lockPath), { recursive: true });
 
   for (;;) {
-    try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      try {
-        // Best-effort breadcrumb for a human debugging a stuck lock; never
-        // relied on programmatically.
-        await handle.writeFile(`${process.pid}\n`, 'utf-8');
-      } finally {
-        await handle.close();
-      }
-      return lockPath;
-    } catch (err) {
-      if (!isErrnoException(err) || err.code !== 'EEXIST') {
-        throw new StorageError(
-          `failed to acquire lock for store file "${filePath}": ${(err as Error).message}`,
-          { cause: err },
-        );
-      }
+    const created = await tryCreateLockFile(lockPath, filePath);
+    if (created) {
+      return created;
     }
 
     // lstat, not stat: the staleness decision is about the lock path
@@ -779,19 +636,16 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
     try {
       const lockStats = await lstat(lockPath);
       if (Date.now() - lockStats.mtimeMs > STALE_LOCK_MS) {
-        if (await tryStealStaleLock(lockPath, filePath)) {
-          return lockPath;
+        const stolen = await stealStaleLock(lockPath, filePath);
+        if (stolen) {
+          return stolen;
         }
-        // else: lost the steal race to another concurrent stealer -- fall
-        // through to the deadline check/sleep below and retry from the top
-        // of the loop, exactly as if we'd found the lock still live.
+        // else: lost the vacancy to another racer (another stealer, or an
+        // ordinary acquirer) -- fall through to the deadline check/sleep
+        // below and retry from the top of the loop, exactly as if we'd
+        // found the lock still live.
       }
     } catch (statErr) {
-      // A StorageError here already came from `tryStealStaleLock` (or
-      // something it called) with its own precise, already-descriptive
-      // message -- propagate it as-is instead of re-wrapping it behind a
-      // generic "failed to inspect lock" label that would obscure which
-      // operation actually failed.
       if (statErr instanceof StorageError) {
         throw statErr;
       }
@@ -814,8 +668,55 @@ async function acquireLock(filePath: string, timeoutMs: number): Promise<string>
   }
 }
 
-async function releaseLock(lockPath: string): Promise<void> {
-  await rm(lockPath, { force: true });
+/**
+ * Checks whether `lockPath`'s *current* on-disk identity (a fresh `lstat` by
+ * name, plus its content's fencing token) still matches `identity` -- the
+ * shared primitive behind both `updateStore`'s commit-time fencing check and
+ * `releaseLock`'s identity check (issue #51). `(dev, ino)` is checked first
+ * as a cheap early-out, but is not sufficient on its own -- an unlinked
+ * inode can be handed straight back to the very next `open('wx')` in the
+ * same directory (see the `LockIdentity` doc comment) -- so a match also
+ * requires the file's content to carry the exact `randomUUID()` token this
+ * caller captured at acquire time. A missing lock file (ENOENT) counts as
+ * "no longer matches", the same as any other identity mismatch.
+ */
+async function currentLockIdentityMatches(
+  lockPath: string,
+  identity: LockIdentity,
+  filePath: string,
+): Promise<boolean> {
+  try {
+    const stats = await lstat(lockPath);
+    if (stats.dev !== identity.dev || stats.ino !== identity.ino) {
+      return false;
+    }
+    const content = await readFile(lockPath, 'utf-8');
+    return parseLockToken(content) === identity.token;
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'ENOENT') {
+      return false;
+    }
+    throw new StorageError(
+      `failed to inspect lock for store file "${filePath}": ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Releases `lock` -- but only if `lock.lockPath`'s current identity still
+ * matches what this caller captured at acquire time (issue #51 round 4).
+ * If it does not match, this caller was stolen from since acquiring, and
+ * what currently occupies `lockPath` belongs to someone else entirely;
+ * blindly `rm`ing it (the pre-round-4 behavior) would delete a rival's live
+ * lock. Releasing is then a no-op instead.
+ */
+async function releaseLock(lock: LockHandle, filePath: string): Promise<void> {
+  const stillOurs = await currentLockIdentityMatches(lock.lockPath, lock.identity, filePath);
+  if (!stillOurs) {
+    return;
+  }
+  await rm(lock.lockPath, { force: true });
 }
 
 /**
@@ -836,20 +737,74 @@ async function releaseLock(lockPath: string): Promise<void> {
  * arbitrary `result` for the caller -- this lets commands like `add`/`rm`/
  * `limit set` return their own result shape (e.g. the new transaction's id)
  * without a second, redundant read.
+ *
+ * Issue #51 round 4: the lock this call acquires is not guaranteed to still
+ * be genuinely, exclusively held by the time the write is ready to commit --
+ * see the design history above `LockIdentity` for why that is now an
+ * accepted possibility rather than something acquisition alone can prevent.
+ * Immediately before `saveStore` commits (its `beforeCommit` hook), this
+ * re-verifies the lock's identity is unchanged; if it was stolen, the write
+ * is never applied and the entire cycle (re-acquire, re-load, re-modify,
+ * re-save) retries from scratch, bounded by the same `timeoutMs` deadline
+ * this call already had. This is purely internal: the external contract --
+ * `updateStore` eventually resolves with the mutator's result, or throws
+ * after timing out -- is unchanged.
  */
 export async function updateStore<T>(
   filePath: string,
   mutator: (store: PersistedStore) => { store: PersistedStore; result: T },
   options: { timeoutMs?: number } = {},
 ): Promise<T> {
-  const lockPath = await acquireLock(filePath, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
-  try {
-    const current = await loadStore(filePath);
-    const { store: next, result } = mutator(current);
-    await saveStore(filePath, next);
-    return result;
-  } finally {
-    await releaseLock(lockPath);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const lock = await acquireLock(filePath, Math.max(0, deadline - Date.now()));
+    let stolen = false;
+    try {
+      const current = await loadStore(filePath);
+      const { store: next, result } = mutator(current);
+      try {
+        await saveStore(filePath, next, {
+          beforeCommit: async () => {
+            const stillOurs = await currentLockIdentityMatches(lock.lockPath, lock.identity, filePath);
+            if (!stillOurs) {
+              throw new LockStolenError();
+            }
+          },
+        });
+      } catch (err) {
+        if (err instanceof LockStolenError) {
+          stolen = true;
+        } else {
+          throw err;
+        }
+      }
+      if (!stolen) {
+        return result;
+      }
+    } finally {
+      // A failing release must never override an already-successful
+      // `result` this try block was about to return -- a `finally` block
+      // that itself throws replaces whatever the `try` was about to return,
+      // per JS semantics. Same defect shape as tryCreateLockFile's close()
+      // guard above, one level up: releaseLock is already a no-op when this
+      // caller's lock was stolen, but if its internal identity check hits a
+      // genuine (non-ENOENT) I/O error, that must not mask a write that
+      // already fully landed. Best-effort/swallowed here on purpose --
+      // errors from the load/mutate/save cycle itself (the rest of the
+      // `try`) are not caught by this and still propagate normally.
+      await releaseLock(lock, filePath).catch(() => {});
+    }
+
+    if (Date.now() >= deadline) {
+      throw new StorageError(
+        `timed out after ${timeoutMs}ms waiting for a lock on store file "${filePath}" -- the lock was repeatedly stolen from this process before its write could commit, try again`,
+      );
+    }
+    // else: loop back and retry the whole load-modify-save cycle -- the
+    // next acquireLock call will find the thief's now-genuinely-live lock
+    // and either wait it out or, if it too goes stale, steal it in turn.
   }
 }
 

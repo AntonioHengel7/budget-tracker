@@ -388,9 +388,12 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
   // (nearly) the same time, which is exactly the multi-stealer scenario
   // above. With the old code this can lose writes (two "holders" interleave
   // their load-modify-save cycles and one clobbers the other); with the
-  // steal-mutex-serialized steal, only one stealer ever wins at a time, so
-  // every single one of the N transactions must survive. At normal
-  // (unthrottled) timing this alone doesn't reliably reproduce the old bug
+  // current fencing design, multiple stealers *can* simultaneously believe
+  // they hold the lock -- that is now allowed -- but the commit-time
+  // fencing check makes any resulting inconsistency harmless (the loser
+  // aborts without writing and retries instead), so every single one of the
+  // N transactions must still survive. At normal (unthrottled) timing this
+  // alone doesn't reliably reproduce the old bug
   // -- real fs calls on a local disk are fast enough that the specific bad
   // interleaving is rare. The test below this one throttles every fs call
   // with randomized latency specifically to force that interleaving open;
@@ -442,8 +445,11 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
   // other racer's steal attempt, this reliably surfaces it as lost writes
   // (verified: it reproduced the loss on both broken implementations above
   // in the majority of runs, at both N=20/8ms-jitter and N=40/15ms-jitter).
-  // Against the current steal-mutex-serialized implementation this must
-  // never lose a write, however the fs calls happen to interleave.
+  // Against the current fencing-based design this must never lose a write,
+  // however the fs calls happen to interleave and however many stealers
+  // simultaneously believe they hold the lock -- that belief is allowed to
+  // be wrong for more than one racer at once now; only the write itself
+  // must never be lost.
   it('issue #51 regression: many concurrent stealers under randomized fs latency never lose a write or double-hold the lock', async () => {
     const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
     const jitter = () => new Promise<void>((resolve) => setTimeout(resolve, Math.random() * 15));
@@ -500,268 +506,191 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
     }
   }, 20_000);
 
-  // Regression (review of PR #82, BLOCKING #1, both Hobbes and Socrates):
-  // the `${lockPath}.steal` meta-mutex that serializes steal attempts had
-  // no staleness/recovery path of its own. If the process holding it
-  // crashed (or any error path skipped its cleanup) before releasing it,
-  // every future acquireLock call would hit EEXIST on the mutex forever --
-  // across restarts, with no in-code recovery -- exactly the permanent
-  // deadlock STALE_LOCK_MS exists to prevent for the main lock, reopened
-  // one level up. Both reviewers reproduced this deterministically: seed a
-  // stale `.lock` plus an orphaned `.lock.steal`, and every updateStore
-  // call used to time out with both files still present.
-  it('issue #51 BLOCKING #1 regression: an orphaned steal-mutex from a crashed holder does not permanently wedge the store', async () => {
+  // Permanent regression test (round 4 redesign, issue #51): Socrates
+  // (round 4 review, PR #82) proved the round-3 rename-based CAS steal is
+  // not real mutual exclusion -- rename() unconditionally replaces whatever
+  // is at the destination, so it cannot fail on a "busy" target. Switching
+  // the grant from rename to unlink-then-open('wx') (this file's round-4
+  // design) does not fully close this either for the case of two racers
+  // racing the same stale lock: P1's rm+open('wx') can claim a fresh lock,
+  // and P2's own already-in-flight rm (based on the same stale-lock
+  // decision) can then delete P1's fresh claim and P2's own subsequent
+  // open('wx') succeeds against the vacancy it just created -- both P1 and
+  // P2 now believe they hold the lock. Round 4's fencing design accepts
+  // this as allowed (no amount of CAS refinement on the *grant* can
+  // structurally prevent it -- POSIX has no atomic "delete this directory
+  // entry only if it still refers to inode X" syscall) and instead makes it
+  // harmless: P1 must detect at commit time that it no longer holds the
+  // real lock and abort-and-retry rather than write.
+  //
+  // This test forces that exact interleaving deterministically (not via
+  // jitter/hope) with a barrier on open/rm, the same technique Socrates
+  // used on rename() in the round 4 review to get 100% reproduction: the
+  // second racer's `rm(lockPath)` call is held back until the first
+  // racer's `open(lockPath, 'wx')` has already succeeded, guaranteeing the
+  // straggler's unlink lands on the winner's just-created fresh lock file.
+  // The invariant under test is the one that actually matters -- every
+  // transaction either racer successfully "sent" ends up persisted, none
+  // silently dropped -- not merely "no error is thrown" (the round-3 bug
+  // produced no error at all).
+  it('issue #51 round 4 permanent regression: a straggler unlinking a rival\'s just-claimed fresh lock never loses a write (deterministic forced interleaving)', async () => {
     const lockPath = `${filePath}.lock`;
-    const stealMutexPath = `${lockPath}.steal`;
-
-    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockPath, old, old);
-
-    // A pid that does not correspond to any running process -- simulates a
-    // `.steal` mutex left behind by a holder that crashed mid-steal before
-    // ever releasing it. (Verified ESRCH for this pid on the CI/dev
-    // platforms this suite targets.)
-    writeFileSync(stealMutexPath, '999999\n', { flag: 'wx' });
-
-    // Three consecutive calls, not just one -- proves this is durable
-    // recovery, not a one-shot fluke.
-    for (let i = 0; i < 3; i += 1) {
-      const stored: StoredTransaction = {
-        id: `tx-recover-${i}`,
-        transaction: { date: '2026-08-01', category: 'groceries', kind: 'expense', amountMinor: i + 1 },
-      };
-      // Deliberately sequential (not Promise.all) -- proving recovery holds
-      // up across repeated calls, not just the first.
-      const result = await updateStore(filePath, appendMutator(stored), { timeoutMs: 2_000 });
-      expect(result).toEqual(stored);
-    }
-
-    const final = await loadStore(filePath);
-    expect(final.transactions.map((t) => t.id).sort()).toEqual([
-      'tx-recover-0',
-      'tx-recover-1',
-      'tx-recover-2',
-    ]);
-    expect(existsSync(stealMutexPath)).toBe(false);
-    expect(existsSync(lockPath)).toBe(false);
-  });
-
-  // Regression (review of PR #82, BLOCKING #2, Socrates): the steal-mutex's
-  // `open('wx')` and its cleanup were in separate, non-nested try blocks --
-  // a rejecting `close()` on the freshly-created mutex handle threw straight
-  // out, skipping cleanup entirely and leaking the mutex file forever
-  // (reproduced with an injected EIO on close()).
-  it('issue #51 BLOCKING #2 regression: a rejecting close() on the steal-mutex handle does not leak the mutex file', async () => {
-    const lockPath = `${filePath}.lock`;
-    const stealMutexPath = `${lockPath}.steal`;
-
     writeFileSync(lockPath, '99999\n', { flag: 'wx' });
     const old = new Date(Date.now() - 60_000);
     utimesSync(lockPath, old, old);
 
     const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
+    let rmCallsOnLockPath = 0;
+    let openCallsOnLockPath = 0;
+    let releaseFirstOpen: () => void;
+    const firstOpenSucceeded = new Promise<void>((resolve) => {
+      releaseFirstOpen = resolve;
+    });
+
+    vi.mocked(rm).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.rm>) => {
+        const [target] = args;
+        if (target === lockPath) {
+          rmCallsOnLockPath += 1;
+          if (rmCallsOnLockPath === 2) {
+            // Force the second racer's clear-attempt to land only after the
+            // first racer's open('wx') has already succeeded in claiming a
+            // fresh lock -- the exact interleaving described above.
+            await firstOpenSucceeded;
+          }
+        }
+        return actualFs.rm(...args);
+      }) as any,
+    );
+
     vi.mocked(open).mockImplementation(
-      // `as any`: fs.promises' overloaded `open` signature doesn't unify
-      // cleanly through a hand-written wrapper; test-only fault injection.
       (async (...args: Parameters<typeof actualFs.open>) => {
+        const [target, flag] = args;
         const handle = await actualFs.open(...args);
-        if (args[0] === stealMutexPath && args[1] === 'wx') {
-          return {
-            ...handle,
-            writeFile: handle.writeFile.bind(handle),
-            close: async () => {
-              // Close the real fd so the test itself doesn't leak one, but
-              // report failure to the caller exactly like a rejecting
-              // close() would (e.g. EIO flushing final buffered data).
-              await handle.close().catch(() => {});
-              throw Object.assign(new Error('simulated EIO on close'), { code: 'EIO' });
-            },
-          };
+        if (target === lockPath && flag === 'wx') {
+          openCallsOnLockPath += 1;
+          if (openCallsOnLockPath === 1) {
+            releaseFirstOpen();
+          }
         }
         return handle;
       }) as any,
     );
 
     try {
-      await expect(
-        updateStore(filePath, appendMutator(txA), { timeoutMs: 500 }),
-      ).rejects.toThrow(StorageError);
+      const [resultA, resultB] = await Promise.all([
+        updateStore(filePath, appendMutator(txA), { timeoutMs: 5_000 }),
+        updateStore(filePath, appendMutator(txB), { timeoutMs: 5_000 }),
+      ]);
 
-      // The mutex file must not be left behind despite the rejecting
-      // close() -- otherwise every future acquireLock call against this
-      // store would wedge on it (BLOCKING #1's failure mode, reintroduced
-      // via a different trigger).
-      expect(existsSync(stealMutexPath)).toBe(false);
+      expect([resultA, resultB]).toEqual(expect.arrayContaining([txA, txB]));
+
+      const final = await loadStore(filePath);
+      expect(final.transactions.map((t) => t.id).sort()).toEqual(['tx-a', 'tx-b']);
     } finally {
+      vi.mocked(rm).mockReset();
       vi.mocked(open).mockReset();
     }
   });
 
-  // Regression (review of PR #82, BLOCKING #3 from round 1, and BLOCKING
-  // #1/#2 from round 2, Socrates + Hobbes): a stealer must never act on a
-  // moments-old staleness decision, and closing that used to (round 2)
-  // mean detaching lockPath via rename() while judging it -- which left
-  // lockPath observably vacant and let exactly this scenario silently
-  // resurrect a zombie lock or double-acquire (see reclaimStaleFile's own
-  // doc comment for the full history). The round 3 fix never detaches
-  // lockPath at all: it reads it in place, then re-checks its (dev, ino)
-  // identity immediately before the one rename that can ever replace it.
-  // This simulates the original (live, merely slow) holder releasing and an
-  // ordinary, unrelated acquirer creating a brand new live lock in the gap
-  // between the stealer's read-based staleness decision and that final
-  // identity check -- the compare-and-swap must detect the identity change
-  // and back off rather than clobber the new live lock.
-  it('PR #82 round 2 BLOCKING 2 regression (Socrates + Hobbes, supersedes round 1 BLOCKING #3): a live lock created between the staleness decision and the steal is never clobbered', async () => {
-    const lockPath = `${filePath}.lock`;
-    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockPath, old, old);
-
-    const liveHolderContent = 'live-holder-content\n';
-
+  // Narrower, fully deterministic regression test for the fencing check
+  // itself (round 4 redesign, issue #51): rather than relying on real
+  // concurrency/timing, this directly injects a lock replacement ("theft")
+  // in between one updateStore call's lock acquisition and the moment its
+  // write would commit. The original caller's write must never land while
+  // it no longer holds the real lock; once the thief has released, the
+  // caller's own bounded internal retry (still within the same timeoutMs
+  // deadline -- updateStore's external contract does not change) must
+  // succeed cleanly, ending with both changes reflected, not one
+  // clobbering the other.
+  it('issue #51 round 4 regression: fencing detects a lock replaced between acquisition and write-commit, never applies the stale write, and succeeds on retry once the thief releases', async () => {
     const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const lockPath = `${filePath}.lock`;
+    let theftDone = false;
 
-    // acquireLock's own outer staleness check is the 1st lstat(lockPath);
-    // reclaimStaleFile's initial read-in-place snapshot is the 2nd; its
-    // final compare-and-swap identity check -- immediately before the
-    // rename that would otherwise land the steal -- is the 3rd. Injecting
-    // right before that 3rd call is exactly "the gap between the staleness
-    // decision and the steal" this regression is about.
-    let lockPathLstatCalls = 0;
-    vi.mocked(lstat).mockImplementation(
-      (async (...args: Parameters<typeof actualFs.lstat>) => {
+    vi.mocked(writeFile).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.writeFile>) => {
         const [target] = args;
-        if (target === lockPath) {
-          lockPathLstatCalls += 1;
-          if (lockPathLstatCalls === 3) {
-            await actualFs.rm(lockPath, { force: true });
-            await actualFs.writeFile(lockPath, liveHolderContent, { flag: 'wx' });
-          }
+        const result = await actualFs.writeFile(...args);
+        if (typeof target === 'string' && target.includes('.tmp') && !theftDone) {
+          // Right after this call's own tempPath write lands (i.e. between
+          // its lock acquisition and the point its write would otherwise
+          // commit via saveStore's fencing-then-rename), simulate a full
+          // concurrent "thief" lifecycle: steal the lock, persist its own
+          // change directly, then release. Guarded by theftDone -- the
+          // thief's own loadStore/saveStore below recurse back through this
+          // same mocked writeFile (for its own tempPath), and must not
+          // trigger a second, nested "theft".
+          theftDone = true;
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
+          await actualFs.writeFile(lockPath, 'thief\n', { flag: 'wx', mode: 0o600 });
+          const thiefView = await loadStore(filePath);
+          await saveStore(filePath, {
+            ...thiefView,
+            transactions: [...thiefView.transactions, txB],
+          });
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
         }
-        return actualFs.lstat(...args);
+        return result;
       }) as any,
     );
 
     try {
-      // The stealer must never proceed believing it holds a lock that's
-      // actually still live -- it should back off and (since nothing ever
-      // releases the simulated live lock) eventually time out loudly,
-      // never silently clobbering it.
-      await expect(
-        updateStore(filePath, appendMutator(txA), { timeoutMs: 1_000 }),
-      ).rejects.toThrow(/timed out.*lock/i);
-
-      // The live lock's content must be exactly what the ordinary acquirer
-      // wrote -- untouched by the failed steal attempt.
-      expect(readFileSync(lockPath, 'utf-8')).toBe(liveHolderContent);
-    } finally {
-      vi.mocked(lstat).mockReset();
-    }
-  });
-
-  // Regression (Hobbes, PR #82 round 2 BLOCKING 1): isStealMutexReclaimable's
-  // parseable-pid branch used to have no time-based backstop at all --
-  // process.kill(pid, 0) reading "alive" made a `.steal` mutex permanently
-  // unreclaimable, full stop. This is not theoretical: entrypoint.sh runs
-  // `exec su-exec node "$@"`, so node is PID 1 inside the Fly container --
-  // every `.steal` file this app writes contains pid 1, and PID 1 reads as
-  // alive after every restart, forever, on a /data volume that persists
-  // across auto_stop_machines cycles. This test seeds a `.steal` mutex whose
-  // recorded pid is this very test process (guaranteed to read as alive via
-  // process.kill(pid, 0), standing in for the PID-1-forever-alive case) but
-  // whose mtime is older than MAX_STEAL_MUTEX_AGE_MS -- the unconditional
-  // time backstop must reclaim it regardless of pid liveness.
-  it('PR #82 round 2 BLOCKING 1 regression: an orphaned steal-mutex whose pid reads as alive forever is still reclaimed once it exceeds the absolute age ceiling', async () => {
-    const lockPath = `${filePath}.lock`;
-    const stealMutexPath = `${lockPath}.steal`;
-
-    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
-    const staleLock = new Date(Date.now() - 60_000);
-    utimesSync(lockPath, staleLock, staleLock);
-
-    // A pid that is genuinely alive for the whole test (this process itself)
-    // -- process.kill(pid, 0) reports it alive indefinitely, exactly like
-    // PID 1 does inside the container. Without an unconditional time
-    // backstop, this mutex would never be reclaimed.
-    writeFileSync(stealMutexPath, `${process.pid}\n`, { flag: 'wx' });
-    const ancientMutex = new Date(Date.now() - 120_000);
-    utimesSync(stealMutexPath, ancientMutex, ancientMutex);
-
-    const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 2_000 });
-    expect(result).toEqual(txA);
-
-    const final = await loadStore(filePath);
-    expect(final.transactions.map((t) => t.id)).toEqual(['tx-a']);
-    expect(existsSync(stealMutexPath)).toBe(false);
-  });
-
-  // Regression (Socrates, PR #82 round 2 BLOCKING 3): the one cleanup path
-  // in this file left unguarded was the temp/tombstone file removal in the
-  // steal primitive's `finally` -- a rejecting cleanup there threw straight
-  // out of `finally`, discarding whatever the try block had already decided
-  // (even a correct "not reclaimable, back off" `false`) and propagating a
-  // raw error all the way out of acquireLock instead of letting the normal
-  // retry loop recover gracefully. This forces exactly that: the lock is
-  // released (not replaced) right before reclaimStaleFile's final
-  // compare-and-swap identity check, so it must legitimately back off with
-  // `false` and let the caller's loop re-acquire it fresh on the very next
-  // iteration -- while the temp file's own best-effort cleanup is made to
-  // reject with a simulated EIO. With the `.catch(() => {})` guard in place,
-  // that rejection must not stop updateStore from completing successfully.
-  it('PR #82 round 2 BLOCKING 3 regression: a rejecting cleanup of the steal primitive\'s private temp file does not mask a legitimate back-off/retry', async () => {
-    const lockPath = `${filePath}.lock`;
-    writeFileSync(lockPath, '99999\n', { flag: 'wx' });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockPath, old, old);
-
-    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
-
-    // Same call-counting trick as the round 2 BLOCKING 2 test above: the 3rd
-    // lstat(lockPath) call is reclaimStaleFile's final identity check,
-    // immediately before it would otherwise rename its temp file onto
-    // lockPath. Here the original holder simply releases (no replacement),
-    // so the identity check legitimately misses (ENOENT) and reclaimStaleFile
-    // must back off with `false` -- at which point it needs to clean up the
-    // private temp file it already created.
-    let lockPathLstatCalls = 0;
-    vi.mocked(lstat).mockImplementation(
-      (async (...args: Parameters<typeof actualFs.lstat>) => {
-        const [target] = args;
-        if (target === lockPath) {
-          lockPathLstatCalls += 1;
-          if (lockPathLstatCalls === 3) {
-            await actualFs.rm(lockPath, { force: true });
-          }
-        }
-        return actualFs.lstat(...args);
-      }) as any,
-    );
-
-    vi.mocked(rm).mockImplementation(
-      (async (...args: Parameters<typeof actualFs.rm>) => {
-        const [target] = args;
-        if (typeof target === 'string' && target.includes('.steal-tmp')) {
-          throw Object.assign(new Error('simulated EIO on temp-file cleanup'), { code: 'EIO' });
-        }
-        return actualFs.rm(...args);
-      }) as any,
-    );
-
-    try {
-      // Nothing else contends for the lock, so once reclaimStaleFile backs
-      // off cleanly, acquireLock's own retry loop must claim the
-      // now-genuinely-vacant lockPath on its very next iteration and
-      // updateStore must succeed -- not throw, despite the injected EIO.
       const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 2_000 });
       expect(result).toEqual(txA);
 
       const final = await loadStore(filePath);
-      expect(final.transactions.map((t) => t.id)).toEqual(['tx-a']);
+      // Neither write clobbered the other.
+      expect(final.transactions.map((t) => t.id).sort()).toEqual(['tx-a', 'tx-b']);
     } finally {
-      vi.mocked(lstat).mockReset();
-      vi.mocked(rm).mockReset();
+      vi.mocked(writeFile).mockReset();
+    }
+  });
+
+  // Regression for releaseLock's own identity check (round 4 redesign,
+  // issue #51): a caller whose lock was stolen out from under it since
+  // acquisition must never blindly `rm` whatever currently occupies
+  // lockPath when it releases -- that would delete a rival's genuinely live
+  // lock. This simulates exactly that: an ordinary (non-steal) acquire,
+  // followed by a theft landing before this call's own write can commit
+  // (so its fencing check correctly aborts it, and its own release in
+  // updateStore's `finally` then runs against a lockPath that is no longer
+  // this caller's). The thief here never releases, so this call cannot
+  // succeed even on retry and eventually times out -- the interesting
+  // assertion is that the thief's lock file is left completely untouched
+  // throughout, proving release was a no-op rather than a blind `rm`.
+  it('issue #51 round 4 regression: releaseLock is a no-op (not a blind rm) when this caller\'s lock was stolen before it could release', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const lockPath = `${filePath}.lock`;
+    const thiefContent = 'thief-holds-this-now\n';
+
+    vi.mocked(writeFile).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.writeFile>) => {
+        const [target] = args;
+        const result = await actualFs.writeFile(...args);
+        if (typeof target === 'string' && target.includes('.tmp')) {
+          // Steal the lock right after this call's own tempPath write
+          // lands, before its fencing check -- and never release it, so
+          // this call cannot succeed even on retry and must eventually
+          // time out.
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
+          await actualFs.writeFile(lockPath, thiefContent, { flag: 'wx', mode: 0o600 });
+        }
+        return result;
+      }) as any,
+    );
+
+    try {
+      await expect(
+        updateStore(filePath, appendMutator(txA), { timeoutMs: 300 }),
+      ).rejects.toThrow(/timed out.*lock/i);
+
+      // The thief's lock file must be exactly what it wrote -- untouched by
+      // the stolen-from caller's own release.
+      expect(readFileSync(lockPath, 'utf-8')).toBe(thiefContent);
+    } finally {
+      vi.mocked(writeFile).mockReset();
     }
   });
 
@@ -796,5 +725,82 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
     // time out waiting on a lock the failed mutator forgot to release).
     const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 200 });
     expect(result).toEqual(txA);
+  });
+
+  // Regression for updateStore's inner catch around `saveStore` (issue #51):
+  // that catch exists specifically to recognize `LockStolenError` and turn
+  // it into a bounded retry -- anything else must still propagate out to
+  // the caller as a genuine failure, not be swallowed or misreported as a
+  // stolen-lock race. This is new machinery as of the round 4 fencing
+  // redesign (pre-redesign, saveStore's own errors propagated with no
+  // wrapping catch at this level at all) and, until this test, its `else`
+  // branch (the rethrow) had never actually been exercised: every other
+  // test either succeeds outright or hits the `LockStolenError` branch.
+  it('issue #51 regression: a save failure that is not a stolen-lock race propagates out of updateStore as-is, not swallowed or retried as a theft', async () => {
+    vi.mocked(rename).mockRejectedValueOnce(new Error('simulated rename failure'));
+
+    await expect(
+      updateStore(filePath, appendMutator(txA), { timeoutMs: 2_000 }),
+    ).rejects.toThrow(/failed to save store file.*simulated rename failure/);
+
+    // Must not have been silently treated as a stolen-lock retry: the lock
+    // is still released (the outer `finally` always runs regardless of
+    // which branch the inner catch took), and no partial write landed.
+    expect(existsSync(`${filePath}.lock`)).toBe(false);
+    const final = await loadStore(filePath);
+    expect(final.transactions).toEqual([]);
+  });
+
+  // Regression for updateStore's own "repeatedly stolen" timeout message
+  // (issue #51, Plato BLOCKING): the existing "many concurrent stealers"
+  // tests above all eventually *succeed* (the thief always releases), so
+  // none of them ever actually drive updateStore's own retry loop to its
+  // deadline -- the only "timed out" message they were shown (by
+  // instrumentation) to actually exercise is acquireLock's older, more
+  // generic one (thrown while polling/waiting on a single still-live lock).
+  // This forces every single attempt to be stolen from, with the thief
+  // itself always releasing immediately after, so updateStore's retry loop
+  // keeps completing full acquire-load-mutate-fenced-out cycles (never
+  // getting stuck inside one acquireLock call polling a live lock) until
+  // timeoutMs is genuinely exhausted at the deadline check between retries
+  // -- the only path that produces this specific message.
+  it('issue #51 regression: exhausting timeoutMs via repeated theft on every retry throws updateStore\'s own "repeatedly stolen" message, not acquireLock\'s generic one', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const lockPath = `${filePath}.lock`;
+    let thiefCount = 0;
+
+    vi.mocked(writeFile).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.writeFile>) => {
+        const [target] = args;
+        const result = await actualFs.writeFile(...args);
+        if (typeof target === 'string' && target.includes('.tmp')) {
+          // Steal this caller's lock, then immediately release the thief's
+          // own claim -- an unbounded stream of independent, well-behaved
+          // stealers that each always win the race against this caller's
+          // commit-time fencing check, but never themselves hold the lock
+          // for long enough to make the caller's *next* acquireLock call
+          // block waiting on a live lock.
+          thiefCount += 1;
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
+          await actualFs.writeFile(lockPath, `${process.pid}\nthief-${thiefCount}\n`, {
+            flag: 'wx',
+            mode: 0o600,
+          });
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
+        }
+        return result;
+      }) as any,
+    );
+
+    try {
+      await expect(
+        updateStore(filePath, appendMutator(txA), { timeoutMs: 300 }),
+      ).rejects.toThrow(
+        /timed out after \d+ms waiting for a lock on store file .* -- the lock was repeatedly stolen from this process before its write could commit, try again/,
+      );
+      expect(thiefCount).toBeGreaterThan(1);
+    } finally {
+      vi.mocked(writeFile).mockReset();
+    }
   });
 });
