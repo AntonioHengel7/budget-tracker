@@ -964,7 +964,6 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
       (async (...args: Parameters<typeof actualFs.open>) => {
         const handle = await actualFs.open(...args);
         const originalClose = handle.close.bind(handle);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only monkeypatch of a FileHandle's own method.
         (handle as any).close = async () => {
           await originalClose();
           throw new Error('simulated EIO on close');
