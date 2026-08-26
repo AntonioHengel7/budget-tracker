@@ -201,6 +201,28 @@ describe('web API', () => {
     expect(res.body).toEqual({ error: 'malformed JSON request body' });
   });
 
+  // Regression (#95): a malformed percent-escape in a route param (e.g.
+  // %zz, which decodeURIComponent cannot decode) makes Express's own
+  // decodeParam step throw a URIError with .status = 400 before any route
+  // handler runs -- this used to fall through the error middleware's
+  // generic branch and surface as a 500, hiding a client-caused bad request
+  // behind a server-error status.
+  it('rejects a malformed percent-escaped route param with a 400, not a 500', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+    const res = await agent.delete('/api/limits/%zz');
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed percent-escaped transaction id route param with a 400, not a 500', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+    const res = await agent.delete('/api/transactions/%zz');
+    expect(res.status).toBe(400);
+  });
+
   it('rejects a request body exceeding the size limit with a 413, not a 500', async () => {
     // express.json() defaults to a 100kb limit; send a valid-JSON body well
     // past that so the only thing under test is the size check, not the parser.

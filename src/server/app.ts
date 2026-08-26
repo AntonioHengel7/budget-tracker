@@ -355,6 +355,31 @@ function isBodyParserPayloadTooLargeError(
 }
 
 /**
+ * Express's router decodes each route param (`decodeURIComponent`) before a
+ * handler ever sees it -- a malformed percent-escape in the URL (e.g.
+ * `/api/limits/%zz`) makes that throw a `URIError`, which `router`'s
+ * `decodeParam` re-tags with `.status = 400` (see `node_modules/router/lib/
+ * layer.js`) before letting it propagate here. Checked by `instanceof
+ * URIError` first, and by an explicit `status`/`statusCode === 400` as a
+ * fallback (in case a differently-shaped decode error reaches here in a
+ * future Express/router version) -- either way this is purely a malformed
+ * request, never a server fault, so it must not fall through to the generic
+ * 500 branch below.
+ */
+function isMalformedParamDecodeError(
+  err: unknown,
+): err is Error & { status?: number; statusCode?: number } {
+  if (err instanceof URIError) {
+    return true;
+  }
+  return (
+    err instanceof Error &&
+    ((err as { status?: number }).status === 400 ||
+      (err as { statusCode?: number }).statusCode === 400)
+  );
+}
+
+/**
  * Builds the Express app. Every data-touching route resolves the per-user
  * store path from `req.username` (set by the auth middleware from the
  * verified session cookie) -- never from client-supplied request body/query
@@ -653,6 +678,15 @@ export function createApp(config: AppConfig): Express {
     // below.
     if (isBodyParserPayloadTooLargeError(err)) {
       res.status(413).json({ error: 'request body too large' });
+      return;
+    }
+
+    // A malformed percent-escaped route param (e.g. DELETE /api/limits/%zz)
+    // surfaces here as a URIError from Express's own decodeParam step, before
+    // any route handler runs -- respond with a clean 400, rather than falling
+    // through to the generic 500 branch below.
+    if (isMalformedParamDecodeError(err)) {
+      res.status(400).json({ error: 'malformed request path' });
       return;
     }
 
