@@ -867,4 +867,156 @@ describe('updateStore (issue #9: concurrent-write race)', () => {
       vi.mocked(writeFile).mockReset();
     }
   });
+
+  // Regression (#92): three safety-critical guards from the round-4 fencing
+  // redesign above had no dedicated test individually pinning them --
+  // reverting any single one, in isolation, left the rest of this file fully
+  // green. Each test below targets exactly one guard.
+
+  // Guard 1: the per-acquisition randomUUID() `token` in `LockIdentity` /
+  // `currentLockIdentityMatches`. The doc comment above `LockIdentity`
+  // explains why `(dev, ino)` alone is not sufficient: on Linux, an unlinked
+  // inode can be handed straight back to the very next `open('wx')` in the
+  // same directory, so a thief's fresh lock file can end up sharing the
+  // exact `(dev, ino)` this caller captured for the lock it lost. This forces
+  // that exact scenario deterministically (rather than hoping for real inode
+  // reuse, which is filesystem/platform dependent): it captures this call's
+  // *own* real lock identity (via a synchronous, unmocked `lstatSync`) the
+  // instant before staging a theft, then forces every subsequent `lstat` on
+  // the lock path -- i.e. the thief's own freshly-created lock file -- to
+  // report that exact same `(dev, ino)`, simulating true inode reuse. If the
+  // token comparison were ever dropped from `currentLockIdentityMatches`
+  // (comparing dev/ino alone), this caller would wrongly conclude it still
+  // holds the lock and its write would incorrectly commit instead of timing
+  // out.
+  it('#92 guard 1: fencing catches a theft that reuses the exact same (dev, ino) -- dev/ino alone would be fooled, the per-acquisition token is what actually catches it', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const { lstatSync } = await import('node:fs');
+    const lockPath = `${filePath}.lock`;
+    let capturedIdentity: { dev: number; ino: number } | undefined;
+    let theftDone = false;
+
+    vi.mocked(lstat).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.lstat>) => {
+        const [target] = args;
+        const result = await actualFs.lstat(...args);
+        if (target === lockPath && capturedIdentity !== undefined) {
+          // Force this (the thief's, post-theft) lock file to report the
+          // exact same (dev, ino) this caller's own original lock had --
+          // simulating the documented inode-reuse scenario.
+          Object.defineProperty(result, 'dev', { value: capturedIdentity.dev });
+          Object.defineProperty(result, 'ino', { value: capturedIdentity.ino });
+        }
+        return result;
+      }) as any,
+    );
+
+    vi.mocked(writeFile).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.writeFile>) => {
+        const [target] = args;
+        const result = await actualFs.writeFile(...args);
+        if (typeof target === 'string' && target.includes('.tmp') && !theftDone) {
+          theftDone = true;
+          // Capture this caller's own real, still-live lock identity right
+          // before deleting it -- this is the baseline the thief's fresh
+          // lock file will be forced to collide with above.
+          const orig = lstatSync(lockPath);
+          capturedIdentity = { dev: orig.dev, ino: orig.ino };
+          await actualFs.rm(lockPath, { force: true }).catch(() => {});
+          await actualFs.writeFile(lockPath, `${process.pid}\nthief-token\n`, {
+            flag: 'wx',
+            mode: 0o600,
+          });
+        }
+        return result;
+      }) as any,
+    );
+
+    try {
+      // The theft is never released, and its (dev, ino) is forced to
+      // collide with this caller's own -- if the token weren't checked, the
+      // fencing check would wrongly report a match and this call would
+      // succeed with a stale write. It must instead time out, having never
+      // committed.
+      await expect(
+        updateStore(filePath, appendMutator(txA), { timeoutMs: 300 }),
+      ).rejects.toThrow(/timed out.*lock/i);
+
+      const final = await loadStore(filePath);
+      expect(final.transactions).toEqual([]);
+    } finally {
+      vi.mocked(lstat).mockReset();
+      vi.mocked(writeFile).mockReset();
+    }
+  });
+
+  // Guard 2: the guarded `handle.close()` inside `tryCreateLockFile`. Per its
+  // doc comment, a failing `close()` on an already-successfully-created lock
+  // file must not discard the successful acquisition -- it is caught and
+  // swallowed (best-effort) rather than left to reject the whole function.
+  // This mocks `open()`'s returned handle so its `close()` rejects, and
+  // verifies the acquisition (and the whole updateStore call) still succeeds
+  // cleanly despite that.
+  it('#92 guard 2: a failing handle.close() in tryCreateLockFile does not discard an already-successful lock acquisition', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+
+    vi.mocked(open).mockImplementationOnce(
+      (async (...args: Parameters<typeof actualFs.open>) => {
+        const handle = await actualFs.open(...args);
+        const originalClose = handle.close.bind(handle);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only monkeypatch of a FileHandle's own method.
+        (handle as any).close = async () => {
+          await originalClose();
+          throw new Error('simulated EIO on close');
+        };
+        return handle;
+      }) as any,
+    );
+
+    const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 2_000 });
+    expect(result).toEqual(txA);
+
+    const final = await loadStore(filePath);
+    expect(final.transactions).toEqual([txA]);
+  });
+
+  // Guard 3: the guarded `releaseLock(...).catch(() => {})` inside
+  // `updateStore`'s `finally` block. Per its doc comment, a failing release
+  // must never override an already-successful result -- a `finally` block
+  // that itself throws replaces whatever the `try` was about to return, per
+  // JS semantics. This forces `currentLockIdentityMatches` (which
+  // `releaseLock` calls internally) to hit a genuine I/O error specifically
+  // on its *second* invocation -- the first is `saveStore`'s own
+  // `beforeCommit` fencing check, which must succeed for the write to commit
+  // at all; the second is `releaseLock`'s own check in the `finally` block --
+  // and verifies `updateStore` still resolves with the already-successful
+  // result instead of rejecting.
+  it('#92 guard 3: a releaseLock failure in updateStore\'s finally block does not override an already-successful result', async () => {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const lockPath = `${filePath}.lock`;
+    let lstatCallsOnLockPath = 0;
+
+    vi.mocked(lstat).mockImplementation(
+      (async (...args: Parameters<typeof actualFs.lstat>) => {
+        const [target] = args;
+        if (target === lockPath) {
+          lstatCallsOnLockPath += 1;
+          if (lstatCallsOnLockPath === 2) {
+            throw Object.assign(new Error('simulated EIO'), { code: 'EIO' });
+          }
+        }
+        return actualFs.lstat(...args);
+      }) as any,
+    );
+
+    try {
+      const result = await updateStore(filePath, appendMutator(txA), { timeoutMs: 2_000 });
+      expect(result).toEqual(txA);
+
+      const final = await loadStore(filePath);
+      expect(final.transactions).toEqual([txA]);
+    } finally {
+      vi.mocked(lstat).mockReset();
+    }
+  });
 });
