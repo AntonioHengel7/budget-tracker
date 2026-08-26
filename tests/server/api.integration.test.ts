@@ -215,6 +215,7 @@ describe('web API', () => {
 
     const res = await agent.delete('/api/limits/%zz');
     expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'malformed request path' });
   });
 
   it('rejects a malformed percent-escaped transaction id route param with a 400, not a 500', async () => {
@@ -223,6 +224,7 @@ describe('web API', () => {
 
     const res = await agent.delete('/api/transactions/%zz');
     expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'malformed request path' });
   });
 
   it('rejects a request body exceeding the size limit with a 413, not a 500', async () => {

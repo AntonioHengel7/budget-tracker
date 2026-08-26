@@ -357,26 +357,12 @@ function isBodyParserPayloadTooLargeError(
 /**
  * Express's router decodes each route param (`decodeURIComponent`) before a
  * handler ever sees it -- a malformed percent-escape in the URL (e.g.
- * `/api/limits/%zz`) makes that throw a `URIError`, which `router`'s
- * `decodeParam` re-tags with `.status = 400` (see `node_modules/router/lib/
- * layer.js`) before letting it propagate here. Checked by `instanceof
- * URIError` first, and by an explicit `status`/`statusCode === 400` as a
- * fallback (in case a differently-shaped decode error reaches here in a
- * future Express/router version) -- either way this is purely a malformed
- * request, never a server fault, so it must not fall through to the generic
- * 500 branch below.
+ * `/api/limits/%zz`) makes that throw a `URIError`, which propagates here.
+ * This is purely a malformed request, never a server fault, so it must not
+ * fall through to the generic 500 branch below.
  */
-function isMalformedParamDecodeError(
-  err: unknown,
-): err is Error & { status?: number; statusCode?: number } {
-  if (err instanceof URIError) {
-    return true;
-  }
-  return (
-    err instanceof Error &&
-    ((err as { status?: number }).status === 400 ||
-      (err as { statusCode?: number }).statusCode === 400)
-  );
+function isMalformedParamDecodeError(err: unknown): err is URIError {
+  return err instanceof URIError;
 }
 
 /**
