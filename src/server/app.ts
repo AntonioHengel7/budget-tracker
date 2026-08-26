@@ -404,6 +404,10 @@ export function createApp(config: AppConfig): Express {
           // (the one that existed was moved to a CSS class for #76) and no
           // external stylesheet host, so neither allowance is needed.
           styleSrc: ["'self'"],
+          // Narrower than helmet's default `font-src 'self' https: data:` --
+          // this app loads zero external fonts (system/bundled fonts only),
+          // so neither the `https:` nor `data:` allowance is needed.
+          fontSrc: ["'self'"],
           // Stricter than helmet's default `frame-ancestors 'self'` --
           // this app has no legitimate reason to ever be framed.
           frameAncestors: ["'none'"],
