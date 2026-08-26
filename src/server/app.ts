@@ -355,6 +355,17 @@ function isBodyParserPayloadTooLargeError(
 }
 
 /**
+ * Express's router decodes each route param (`decodeURIComponent`) before a
+ * handler ever sees it -- a malformed percent-escape in the URL (e.g.
+ * `/api/limits/%zz`) makes that throw a `URIError`, which propagates here.
+ * This is purely a malformed request, never a server fault, so it must not
+ * fall through to the generic 500 branch below.
+ */
+function isMalformedParamDecodeError(err: unknown): err is URIError {
+  return err instanceof URIError;
+}
+
+/**
  * Builds the Express app. Every data-touching route resolves the per-user
  * store path from `req.username` (set by the auth middleware from the
  * verified session cookie) -- never from client-supplied request body/query
@@ -379,6 +390,10 @@ export function createApp(config: AppConfig): Express {
           // (the one that existed was moved to a CSS class for #76) and no
           // external stylesheet host, so neither allowance is needed.
           styleSrc: ["'self'"],
+          // Narrower than helmet's default `font-src 'self' https: data:` --
+          // this app loads zero external fonts (system/bundled fonts only),
+          // so neither the `https:` nor `data:` allowance is needed.
+          fontSrc: ["'self'"],
           // Stricter than helmet's default `frame-ancestors 'self'` --
           // this app has no legitimate reason to ever be framed.
           frameAncestors: ["'none'"],
@@ -653,6 +668,15 @@ export function createApp(config: AppConfig): Express {
     // below.
     if (isBodyParserPayloadTooLargeError(err)) {
       res.status(413).json({ error: 'request body too large' });
+      return;
+    }
+
+    // A malformed percent-escaped route param (e.g. DELETE /api/limits/%zz)
+    // surfaces here as a URIError from Express's own decodeParam step, before
+    // any route handler runs -- respond with a clean 400, rather than falling
+    // through to the generic 500 branch below.
+    if (isMalformedParamDecodeError(err)) {
+      res.status(400).json({ error: 'malformed request path' });
       return;
     }
 

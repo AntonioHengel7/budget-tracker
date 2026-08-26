@@ -155,22 +155,24 @@ describe('web API', () => {
 
   it('serves the SPA index.html for a non-API route when staticDir is configured, and never for /api routes', async () => {
     const tmpWeb = await mkdtemp(join(tmpdir(), 'budget-web-test-'));
-    await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
-    const staticApp = createApp({
-      dataDir,
-      credentials: [{ username: 'antonio', passwordHash }],
-      sessionSecret: 'test-secret',
-      staticDir: tmpWeb,
-    });
+    try {
+      await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
+      const staticApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        staticDir: tmpWeb,
+      });
 
-    const page = await request(staticApp).get('/some/client/route');
-    expect(page.status).toBe(200);
-    expect(page.text).toContain('<title>t</title>');
+      const page = await request(staticApp).get('/some/client/route');
+      expect(page.status).toBe(200);
+      expect(page.text).toContain('<title>t</title>');
 
-    const apiFallthrough = await request(staticApp).get('/api/does-not-exist');
-    expect(apiFallthrough.status).not.toBe(200);
-
-    await rm(tmpWeb, { recursive: true, force: true });
+      const apiFallthrough = await request(staticApp).get('/api/does-not-exist');
+      expect(apiFallthrough.status).not.toBe(200);
+    } finally {
+      await rm(tmpWeb, { recursive: true, force: true });
+    }
   });
 
   it('maps a corrupted store file to a generic 500 without leaking the file path or internal message', async () => {
@@ -199,6 +201,30 @@ describe('web API', () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'malformed JSON request body' });
+  });
+
+  // Regression (#95): a malformed percent-escape in a route param (e.g.
+  // %zz, which decodeURIComponent cannot decode) makes Express's own
+  // decodeParam step throw a URIError with .status = 400 before any route
+  // handler runs -- this used to fall through the error middleware's
+  // generic branch and surface as a 500, hiding a client-caused bad request
+  // behind a server-error status.
+  it('rejects a malformed percent-escaped route param with a 400, not a 500', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+    const res = await agent.delete('/api/limits/%zz');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'malformed request path' });
+  });
+
+  it('rejects a malformed percent-escaped transaction id route param with a 400, not a 500', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'antonio', password: PASSWORD });
+
+    const res = await agent.delete('/api/transactions/%zz');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'malformed request path' });
   });
 
   it('rejects a request body exceeding the size limit with a 413, not a 500', async () => {
@@ -456,26 +482,65 @@ describe('web API', () => {
 
     it('applies the same security headers on the static/SPA-served path', async () => {
       const tmpWeb = await mkdtemp(join(tmpdir(), 'budget-web-headers-test-'));
-      await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
-      const staticApp = createApp({
-        dataDir,
-        credentials: [{ username: 'antonio', passwordHash }],
-        sessionSecret: 'test-secret',
-        staticDir: tmpWeb,
-      });
+      try {
+        await writeFile(join(tmpWeb, 'index.html'), '<!doctype html><title>t</title>');
+        const staticApp = createApp({
+          dataDir,
+          credentials: [{ username: 'antonio', passwordHash }],
+          sessionSecret: 'test-secret',
+          staticDir: tmpWeb,
+        });
 
-      const page = await request(staticApp).get('/some/client/route');
-      expect(page.status).toBe(200);
+        const page = await request(staticApp).get('/some/client/route');
+        expect(page.status).toBe(200);
 
-      const csp = page.headers['content-security-policy'];
+        const csp = page.headers['content-security-policy'];
+        expect(csp).toBeDefined();
+        expect(csp).toContain("script-src 'self'");
+        expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+
+        expect(page.headers['x-frame-options']).toBe('DENY');
+        expect(page.headers['x-powered-by']).toBeUndefined();
+      } finally {
+        await rm(tmpWeb, { recursive: true, force: true });
+      }
+    });
+
+    // Regression (#96): font-src previously fell through to helmet's default
+    // (`'self' https: data:`), which is broader than this app needs -- it
+    // loads zero external fonts. Pinned to the actual header content, not
+    // just "the app boots", so narrowing this back down is caught.
+    it('sets a narrow font-src (no https:/data: fallback) since this app loads no external fonts', async () => {
+      const res = await request(app).get('/api/me');
+
+      const csp = res.headers['content-security-policy'];
       expect(csp).toBeDefined();
-      expect(csp).toContain("script-src 'self'");
-      expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+      expect(csp).toContain("font-src 'self'");
+      expect(csp).not.toMatch(/font-src[^;]*https:/);
+      expect(csp).not.toMatch(/font-src[^;]*data:/);
+    });
 
-      expect(page.headers['x-frame-options']).toBe('DENY');
-      expect(page.headers['x-powered-by']).toBeUndefined();
+    // Regression (#96): frame-ancestors 'none' and upgradeInsecureRequests:
+    // null in the helmet config previously had no test pinning them --
+    // deleting either config line left every existing test green (they only
+    // ever checked script-src/x-frame-options/x-powered-by). Assert the
+    // actual header content so a revert of either line is caught here.
+    it('sets frame-ancestors \'none\' in the CSP (stricter than helmet\'s own default of \'self\')', async () => {
+      const res = await request(app).get('/api/me');
 
-      await rm(tmpWeb, { recursive: true, force: true });
+      const csp = res.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      expect(csp).toContain("frame-ancestors 'none'");
+    });
+
+    it('omits upgrade-insecure-requests from the CSP, so local plaintext-HTTP dev is never forced to HTTPS', async () => {
+      const res = await request(app).get('/api/me');
+
+      const csp = res.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      // helmet includes this directive by default; only an explicit `null`
+      // override (see createApp's helmet config) removes it entirely.
+      expect(csp).not.toMatch(/upgrade-insecure-requests/);
     });
   });
 });
