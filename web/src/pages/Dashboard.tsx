@@ -111,11 +111,17 @@ export function Dashboard(): React.JSX.Element {
                   {status.map((row) => (
                     <tr key={row.category}>
                       <td>{row.category}</td>
-                      <td className="numeric">{formatMinor(row.limitMinor)}</td>
+                      <td className="numeric">
+                        {row.state === 'unset' ? 'n/a' : formatMinor(row.limitMinor)}
+                      </td>
                       <td className="numeric">{formatMinor(row.spentMinor)}</td>
-                      <td className="numeric">{formatMinor(row.availableMinor)}</td>
+                      <td className="numeric">
+                        {row.state === 'unset' ? 'n/a' : formatMinor(row.availableMinor)}
+                      </td>
                       <td>
-                        <span className={`status-${row.state}`}>{row.state}</span>
+                        <span className={`status-${row.state}`}>
+                          {row.state === 'unset' ? 'not in effect' : row.state}
+                        </span>
                       </td>
                     </tr>
                   ))}

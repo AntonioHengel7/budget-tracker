@@ -49,6 +49,28 @@ describe('getStatus', () => {
     await expect(getStatus(filePath, { period: 'not-a-period' })).rejects.toThrow(ValidationError);
   });
 
+  // (#100) When a category's only limit's effectiveFrom is later than the
+  // queried period, resolveLimit finds nothing -- state must be 'unset', not
+  // a misleading 'over'/'at'/'under' against an implicit $0 ceiling.
+  it('state is "unset" when queried before the category\'s limit takes effect', async () => {
+    await setLimit(filePath, { category: 'groceries', amount: '100', effectiveFrom: '2026-09' });
+
+    const results = await getStatus(filePath, { period: '2026-08' });
+
+    expect(results).toEqual([
+      {
+        period: '2026-08',
+        category: 'groceries',
+        limitMinor: 0,
+        carryInMinor: 0,
+        availableMinor: 0,
+        spentMinor: 0,
+        state: 'unset',
+        pctUsed: null,
+      },
+    ]);
+  });
+
   it('lists categories alphabetically regardless of underlying budget array order (#14)', async () => {
     // Set 'zebra' first, then 'apple' -- store.budgets ends up in insertion
     // order [zebra, apple], which is already non-alphabetical. Correcting

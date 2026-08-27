@@ -200,6 +200,36 @@ describe('CLI smoke test (real process invocation)', () => {
     );
   });
 
+  // (#100) A category whose only limit hasn't taken effect yet for the
+  // queried period must not read as a $0 limit: the status table should
+  // print 'n/a' for limit/carry/available and 'unset' for state, instead of
+  // formatSignedAmount(0) for the money columns. pctUsed's own column is
+  // 'n/a' for unrelated reasons (formatPercent(null), see format.ts)
+  // whenever ceilingMinor is 0 -- true here regardless of this fix -- so a
+  // bare stdout.toContain('n/a') can't distinguish "the fix works" from "the
+  // fix is entirely absent". This parses the actual table row and checks the
+  // limit/carry/available columns specifically, by position.
+  it('status prints "n/a" for limit/carry/available and "unset" for state before the limit takes effect', () => {
+    const limit = runCli(['--file', filePath, 'limit', 'set', 'groceries', '100', '--effective-from', '2026-09']);
+    expect(limit.status).toBe(0);
+
+    const status = runCli(['--file', filePath, 'status', '--period', '2026-08']);
+    expect(status.status).toBe(0);
+
+    const groceriesLine = status.stdout.split('\n').find((line) => line.includes('groceries'));
+    expect(groceriesLine).toBeDefined();
+    const [category, limitCol, carryCol, availableCol, spentCol, stateCol] = (groceriesLine ?? '')
+      .trim()
+      .split(/\s{2,}/);
+    expect(category).toBe('groceries');
+    expect(limitCol).toBe('n/a');
+    expect(carryCol).toBe('n/a');
+    expect(availableCol).toBe('n/a');
+    // spent stays real data (0.00), not folded into the 'n/a' treatment.
+    expect(spentCol).toBe('0.00');
+    expect(stateCol).toBe('unset');
+  });
+
   it('exits 1 with a one-line stderr message on a handled validation error', () => {
     expect(() =>
       execFileSync('node', [CLI_PATH, '--file', filePath, 'add', '-5', 'groceries', '--kind', 'expense'], {
