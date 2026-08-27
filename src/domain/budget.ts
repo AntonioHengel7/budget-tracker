@@ -51,7 +51,7 @@ export function createCategoryBudget(input: CategoryBudgetInput): CategoryBudget
   };
 }
 
-export type BudgetState = 'over' | 'at' | 'under';
+export type BudgetState = 'over' | 'at' | 'under' | 'unset';
 
 export interface PeriodBudgetStatus {
   readonly period: Period;
@@ -191,7 +191,13 @@ export function budgetStatus(
   const spentMinor = spentInPeriod(transactions, budget.category, period);
 
   const state: BudgetState =
-    spentMinor > ceilingMinor ? 'over' : spentMinor === ceilingMinor ? 'at' : 'under';
+    limit === undefined
+      ? 'unset'
+      : spentMinor > ceilingMinor
+        ? 'over'
+        : spentMinor === ceilingMinor
+          ? 'at'
+          : 'under';
   const pctUsed = ceilingMinor === 0 ? null : (spentMinor / ceilingMinor) * 100;
   const availableMinor = subtractSpentFromAvailable(ceilingMinor, spentMinor);
 
