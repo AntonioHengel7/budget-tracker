@@ -2,11 +2,15 @@
 # =============================================================================
 # pre-merge-gate.sh — PreToolUse Bash hook
 # Guards `gh pr merge` commands. Blocks unless ALL of:
-#   (a) SOCRATES + PLATO + HOBBES each have a "PASS @ <head-sha>" verdict
-#       posted by the AUTHENTICATED ACCOUNT (gh api user) in PR comments
-#       (SHA-bound, structural author filter — body injection cannot forge author)
-#   (b) coverage-gate.sh exits 0
-#   (c) .jome/verify.sh exits 0 (skipped if absent)
+#   (a)  SOCRATES + PLATO + HOBBES each have a "PASS @ <head-sha>" verdict
+#        posted by the AUTHENTICATED ACCOUNT (gh api user) in PR comments
+#        (SHA-bound, structural author filter — body injection cannot forge author)
+#   (a2) GitHub's actual CI status (statusCheckRollup) at the head SHA is
+#        green — no pending/failed checks. Posted verdicts are not proof CI
+#        passed; a reviewer can post PASS after CI already failed, or before
+#        it finishes. No CI configured on the repo is not a failure.
+#   (b)  coverage-gate.sh exits 0
+#   (c)  .jome/verify.sh exits 0 (skipped if absent)
 #
 # Only active in repos with .jome/coverage.json `"enforce": true`.
 #
@@ -88,6 +92,62 @@ fi
 # Single porcelain merge — proceed with PR-number + verdict verification.
 
 # ---------------------------------------------------------------------------
+# Resolve the target repo ONCE, early — every `gh pr ...` call below must be
+# bound to the repo the intercepted command actually targets (via `cd <path>`
+# in the command string), not the hook's own process cwd. Hooks run with
+# cwd=Jome root between tool calls (see enforce-gate.sh's header comment); a
+# bare `cd <repo> && gh pr merge <n> ...` from a different session's cwd
+# previously left every unqualified `gh pr view` call below resolving
+# against the wrong repo (or failing outright), producing "unable to
+# resolve head commit SHA" even when every real gate condition (verdicts,
+# CI, coverage) was actually satisfied. Fixes Jome issue #6.
+#
+# TARGET_DIR/REPO_ROOT are also reused later for coverage-gate.sh/verify.sh.
+# ---------------------------------------------------------------------------
+TARGET_DIR=$(_effective_dir "$COMMAND")
+REPO_ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
+  echo "ERROR: gh pr merge blocked — not inside a git repository." >&2
+  exit 2
+}
+
+# N2b: Extract --repo/-R value for cross-repo merges. An explicit flag on
+# the command always wins; otherwise derive the default below from
+# REPO_ROOT's own git remote.
+CROSS_REPO=""
+_EXTRACT_AFTER=$(printf '%s' "$COMMAND" | sed 's/.*gh[[:space:]]\{1,\}pr[[:space:]]\{1,\}merge//')
+_SKIP_R=0
+while IFS= read -r _RT; do
+  [ -z "$_RT" ] && continue
+  if [ "$_SKIP_R" -eq 1 ]; then
+    CROSS_REPO="$_RT"
+    break
+  fi
+  case "$_RT" in
+    --repo|-R) _SKIP_R=1 ;;
+    --repo=*)  CROSS_REPO="${_RT#*=}"; break ;;
+  esac
+done < <(printf '%s' "$_EXTRACT_AFTER" | xargs -n1 printf '%s\n' 2>/dev/null || true)
+
+# No explicit flag — derive the default repo from REPO_ROOT's own git
+# remote, resolved IN that directory (a subshell cd, not the hook's cwd).
+if [ -z "$CROSS_REPO" ]; then
+  set +e
+  CROSS_REPO=$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+  set -e
+fi
+
+if [ -z "$CROSS_REPO" ]; then
+  echo "ERROR: gh pr merge blocked — unable to resolve the target repo (no --repo/-R given and 'gh repo view' failed in ${REPO_ROOT})." >&2
+  exit 2
+fi
+
+# Helper: invoke `gh pr view` bound to the resolved repo — used for every
+# PR lookup below (flagless PR-number resolution, head-SHA fetch, comments).
+gh_pr_view() {
+  gh pr view -R "$CROSS_REPO" "$@"
+}
+
+# ---------------------------------------------------------------------------
 # F1: Robust PR number extraction (N1: positional-only, skip flag values).
 #
 # Strategy: extract the part of the command after "gh pr merge", then
@@ -156,7 +216,7 @@ if [ -z "$PR_NUM" ]; then
   # No inline PR number — flag-less `gh pr merge` form: resolve the current
   # branch's open PR number via gh.
   set +e
-  PR_NUM=$(gh pr view --json number --jq '.number' 2>/dev/null)
+  PR_NUM=$(gh_pr_view --json number --jq '.number' 2>/dev/null)
   set -e
 fi
 
@@ -166,48 +226,8 @@ if [ -z "$PR_NUM" ]; then
   exit 2
 fi
 
-# ---------------------------------------------------------------------------
-# Locate repo root for finding .jome/verify.sh and coverage-gate.sh.
-# Use _effective_dir to handle cwd-reset: the hook runs with cwd=Jome root,
-# but the command may target a different repo via `cd <path>`.
-# Fail CLOSED if not in a git repo (shouldn't happen after repo_is_enforced).
-# ---------------------------------------------------------------------------
-TARGET_DIR=$(_effective_dir "$COMMAND")
-REPO_ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
-  echo "ERROR: PR #${PR_NUM} merge blocked — not inside a git repository." >&2
-  exit 2
-}
-
 # Allow tests to override coverage-gate path via env var for stubbing.
 COVERAGE_GATE="${JOME_COVERAGE_GATE_BIN:-$SCRIPT_DIR/lib/coverage-gate.sh}"
-
-# ---------------------------------------------------------------------------
-# N2b: Extract --repo/-R value for cross-repo merges.
-# When present, all gh pr view calls are directed to that repo.
-# ---------------------------------------------------------------------------
-CROSS_REPO=""
-_EXTRACT_AFTER=$(printf '%s' "$COMMAND" | sed 's/.*gh[[:space:]]\{1,\}pr[[:space:]]\{1,\}merge//')
-_SKIP_R=0
-while IFS= read -r _RT; do
-  [ -z "$_RT" ] && continue
-  if [ "$_SKIP_R" -eq 1 ]; then
-    CROSS_REPO="$_RT"
-    break
-  fi
-  case "$_RT" in
-    --repo|-R) _SKIP_R=1 ;;
-    --repo=*)  CROSS_REPO="${_RT#*=}"; break ;;
-  esac
-done < <(printf '%s' "$_EXTRACT_AFTER" | xargs -n1 printf '%s\n' 2>/dev/null || true)
-
-# Helper: invoke `gh pr view` with optional cross-repo -R flag.
-gh_pr_view() {
-  if [ -n "$CROSS_REPO" ]; then
-    gh pr view -R "$CROSS_REPO" "$@"
-  else
-    gh pr view "$@"
-  fi
-}
 
 # ---------------------------------------------------------------------------
 # B1: Authenticated-user verdict check (structural author filtering).
@@ -330,6 +350,63 @@ if [ -n "$MISSING_VERDICTS" ] || [ -n "$FAIL_VERDICTS" ]; then
     echo "ERROR: PR #${PR_NUM} merge blocked — FAIL verdict(s) for commit ${HEAD_SHA}:${FAIL_VERDICTS}" >&2
   echo "  Post verdicts as: <AGENT>: PASS @ ${HEAD_SHA}" >&2
   echo "  See .claude/lib/gh-schema.md for the verdict format." >&2
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# (a2) CI STATUS: verify GitHub's actual CI status at HEAD_SHA, not just
+# posted verdict comments. A reviewer PASS proves the reviewer looked; it
+# does not prove CI passed — a PASS can be posted after CI already failed,
+# or before it has finished. This queries the same statusCheckRollup field
+# gh-schema.md documents as a Pinned Interface, structurally rather than by
+# trusting any comment.
+#
+# GitHub's rollup returns a mix of two GraphQL union types:
+#   CheckRun      (GitHub Actions etc.)  — fields: status, conclusion
+#   StatusContext (legacy commit status) — fields: state
+#
+# Empty/null rollup (no CI configured on the repo) is NOT a failure — pass
+# through, same policy as .jome/verify.sh's "skipped if absent" below.
+# Fail CLOSED if the rollup itself can't be fetched.
+# ---------------------------------------------------------------------------
+set +e
+ROLLUP_JSON=$(gh_pr_view "$PR_NUM" --json statusCheckRollup 2>/dev/null)
+ROLLUP_EXIT=$?
+set -e
+
+if [ "$ROLLUP_EXIT" -ne 0 ]; then
+  echo "ERROR: PR #${PR_NUM} merge blocked — unable to resolve CI status (statusCheckRollup)." >&2
+  exit 2
+fi
+
+CI_PROBLEMS=$(printf '%s' "$ROLLUP_JSON" | jq -r '
+  [.statusCheckRollup[]? |
+    if .__typename == "CheckRun" then
+      if .status != "COMPLETED" then
+        "PENDING: \(.name // .workflowName // "unknown") (still running)"
+      elif (.conclusion // "") as $c | ($c == "SUCCESS" or $c == "NEUTRAL" or $c == "SKIPPED") then
+        empty
+      else
+        "FAILED: \(.name // .workflowName // "unknown") (\(.conclusion // "unknown"))"
+      end
+    elif .__typename == "StatusContext" then
+      if .state == "SUCCESS" then
+        empty
+      elif .state == "PENDING" then
+        "PENDING: \(.context // "unknown") (still running)"
+      else
+        "FAILED: \(.context // "unknown") (\(.state))"
+      end
+    else
+      empty
+    end
+  ] | .[]' 2>/dev/null || true)
+
+if [ -n "$CI_PROBLEMS" ]; then
+  echo "ERROR: PR #${PR_NUM} merge blocked — CI is not green at ${HEAD_SHA}:" >&2
+  printf '%s\n' "$CI_PROBLEMS" | while IFS= read -r _problem; do
+    echo "  $_problem" >&2
+  done
   exit 2
 fi
 
