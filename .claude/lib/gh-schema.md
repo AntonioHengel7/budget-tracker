@@ -171,7 +171,7 @@ EOF
 
 Each reviewer (SOCRATES, PLATO, HOBBES) posts **its own** verdict as a PR comment, as the last action of its own review — not relayed by the orchestrator afterward. The `pre-merge-gate.sh` hook greps for all three PASS at the exact head SHA before allowing `gh pr merge`. Note the hook's trust anchor is "authored by the authenticated `gh` account," which is the same account for every agent and the orchestrator — this convention (reviewer posts its own comment, as its own last action) is process discipline against fabricated verdicts, not a cryptographic guarantee.
 
-**A verdict must be posted as a comment on the PR itself, not on the tracking issue** — even before a PR exists, don't post it to the issue as a stand-in; open the PR first, then dispatch reviewers, since `gh pr view --json comments` and `gh issue view --json comments` are separate comment threads even when the issue and PR are related.
+A verdict **must be posted as a comment on the PR itself, not on the tracking issue** — even before a PR exists, don't post it to the issue as a stand-in; open the PR first, then dispatch reviewers, since `gh pr view --json comments` and `gh issue view --json comments` are separate comment threads even when the issue and PR are related.
 
 ### Posting a verdict
 
@@ -192,7 +192,7 @@ Format rules (the gate greps these exactly, `pre-merge-gate.sh`):
 - The comment's FIRST LINE must be exactly `<AGENT>: PASS @ <sha>` (no trailing text — the gate anchors PASS with `$`) or start with `<AGENT>: FAIL @ <sha>` (trailing reason text like `— 2 blocking` is fine for FAIL).
 - `<sha>` must be the PR's **current, full 40-character** head commit SHA (`headRefOid`) — a short SHA or a stale one from a prior commit does not match and the gate treats the agent as MISSING.
 - The gate takes the LATEST matching verdict per agent (comments iterated oldest → newest), and only counts comments authored by the authenticated `gh` account (structural `.author.login` filter — see `pre-merge-gate.sh`'s B1 section — body-injection cannot forge this).
-- The gate greps PR comments via: `gh pr view <n> --json comments --jq '.comments[].body'`, taking only each comment's first line (`split("\n")[0]`).
+- The gate greps PR comments via: `gh pr view <n> --json comments`, piped through `jq -r --arg me "$ME" '.comments[] | select(.author.login==$me) | (.body | split("\n")[0])'` — filtering to comments authored by the authenticated `gh` account and taking each one's first line.
 
 ### Merge-gate PR view queries (Pinned Interfaces)
 
@@ -200,7 +200,7 @@ Format rules (the gate greps these exactly, `pre-merge-gate.sh`):
 gh pr view <pr_number> --json reviewDecision,mergeStateStatus,mergeable,statusCheckRollup
 ```
 
-`statusCheckRollup` is actively checked by `pre-merge-gate.sh` (not just queryable) — the gate blocks the merge if any check in the rollup at the head SHA is pending or failed, independent of what any reviewer verdict says. Posted PASS verdicts are not proof CI passed.
+**This repo's `pre-merge-gate.sh` does not currently query or evaluate `statusCheckRollup`** — it only checks (a) SHA-bound verdicts, (b) `coverage-gate.sh`, (c) `.jome/verify.sh` (see the hook's own header comment). The Jome harness repo's copy of this hook *does* actively check `statusCheckRollup` (added there in commit `28f98e4`), but that change hasn't been ported to this repo yet — tracked as issue #98. Until #98 lands, CI-green enforcement here comes entirely from GitHub branch protection on `main` (`required_status_checks.contexts: ["ci"]`, `enforce_admins: true`), not from this local hook. Don't assume a posted PASS verdict implies CI was checked locally.
 
 ---
 
