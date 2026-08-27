@@ -169,35 +169,38 @@ EOF
 
 ## Reviewer Verdict Markers
 
-Reviewers (SOCRATES, PLATO, HOBBES) post their verdict as a PR comment. The `pre-merge-gate.sh` hook greps for all three PASS before allowing `gh pr merge`.
+Each reviewer (SOCRATES, PLATO, HOBBES) posts **its own** verdict as a PR comment, as the last action of its own review — not relayed by the orchestrator afterward. The `pre-merge-gate.sh` hook greps for all three PASS at the exact head SHA before allowing `gh pr merge`. Note the hook's trust anchor is "authored by the authenticated `gh` account," which is the same account for every agent and the orchestrator — this convention (reviewer posts its own comment, as its own last action) is process discipline against fabricated verdicts, not a cryptographic guarantee.
+
+A verdict **must be posted as a comment on the PR itself, not on the tracking issue** — even before a PR exists, don't post it to the issue as a stand-in; open the PR first, then dispatch reviewers, since `gh pr view --json comments` and `gh issue view --json comments` are separate comment threads even when the issue and PR are related.
 
 ### Posting a verdict
 
 ```sh
-# PASS
-gh pr comment <pr_number> --body "SOCRATES: PASS"
-gh pr comment <pr_number> --body "PLATO: PASS"
-gh pr comment <pr_number> --body "HOBBES: PASS"
+# PASS (SHA-bound — the hook requires the exact current head SHA)
+gh pr comment <pr_number> --body "SOCRATES: PASS @ <full-40-char-sha>"
+gh pr comment <pr_number> --body "PLATO: PASS @ <full-40-char-sha>"
+gh pr comment <pr_number> --body "HOBBES: PASS @ <full-40-char-sha>"
 
 # FAIL (n = count of blocking issues found)
-gh pr comment <pr_number> --body "SOCRATES: FAIL — 2 blocking"
-gh pr comment <pr_number> --body "PLATO: FAIL — 1 blocking"
-gh pr comment <pr_number> --body "HOBBES: FAIL — 3 blocking"
+gh pr comment <pr_number> --body "SOCRATES: FAIL @ <full-40-char-sha> — 2 blocking"
+gh pr comment <pr_number> --body "PLATO: FAIL @ <full-40-char-sha> — 1 blocking"
+gh pr comment <pr_number> --body "HOBBES: FAIL @ <full-40-char-sha> — 3 blocking"
 ```
 
-Format rules (the gate greps these exactly):
+Format rules (the gate greps these exactly, `pre-merge-gate.sh`):
 - Agent names are ALL-CAPS: `SOCRATES`, `PLATO`, `HOBBES`.
-- Verdict is either exactly `PASS` or `FAIL — <n> blocking`.
-- No other text on the same line as the verdict keyword.
-- The gate greps PR comments via: `gh pr view <n> --json comments --jq '.comments[].body'`
-  and checks that each of the three agents has at least one comment matching `<AGENT>: PASS`.
-  (Verified 2026-06-26 against gh 2.59.0: `comments` is a valid `--json` field.)
+- The comment's FIRST LINE must be exactly `<AGENT>: PASS @ <sha>` (no trailing text — the gate anchors PASS with `$`) or start with `<AGENT>: FAIL @ <sha>` (trailing reason text like `— 2 blocking` is fine for FAIL).
+- `<sha>` must be the PR's **current, full 40-character** head commit SHA (`headRefOid`) — a short SHA or a stale one from a prior commit does not match and the gate treats the agent as MISSING.
+- The gate takes the LATEST matching verdict per agent (comments iterated oldest → newest), and only counts comments authored by the authenticated `gh` account (structural `.author.login` filter — see `pre-merge-gate.sh`'s B1 section — body-injection cannot forge this).
+- The gate greps PR comments via: `gh pr view <n> --json comments`, piped through `jq -r --arg me "$ME" '.comments[] | select(.author.login==$me) | (.body | split("\n")[0])'` — filtering to comments authored by the authenticated `gh` account and taking each one's first line.
 
-### Merge-gate PR view query (Pinned Interface)
+### Merge-gate PR view queries (Pinned Interfaces)
 
 ```sh
 gh pr view <pr_number> --json reviewDecision,mergeStateStatus,mergeable,statusCheckRollup
 ```
+
+**This repo's `pre-merge-gate.sh` does not currently query or evaluate `statusCheckRollup`** — it only checks (a) SHA-bound verdicts, (b) `coverage-gate.sh`, (c) `.jome/verify.sh` (see the hook's own header comment). The Jome harness repo's copy of this hook *does* actively check `statusCheckRollup` (added there in commit `28f98e4`), but that change hasn't been ported to this repo yet — tracked as issue #98. Until #98 lands, CI-green enforcement here comes entirely from GitHub branch protection on `main` (`required_status_checks.contexts: ["ci"]`, `enforce_admins: true`), not from this local hook. Don't assume a posted PASS verdict implies CI was checked locally.
 
 ---
 
