@@ -230,6 +230,36 @@ describe('CLI smoke test (real process invocation)', () => {
     expect(stateCol).toBe('unset');
   });
 
+  // Regression (Socrates, #100): the previous "unset" smoke test only
+  // exercised spentMinor === 0 (nothing was ever spent in the category), so
+  // it couldn't distinguish "spent is real data" from "spent happens to be
+  // folded into the same 'n/a' treatment as limit/carry/available". This
+  // spends money in the category *before* its limit takes effect -- spent
+  // must still report the real amount while limit/carry/available stay
+  // 'n/a'.
+  it('status prints the real spent amount (not "n/a") for a category with spend but no limit yet in effect', () => {
+    const add = runCli(['--file', filePath, 'add', '42.50', 'groceries', '--kind', 'expense', '--date', '2026-08-05']);
+    expect(add.status).toBe(0);
+
+    const limit = runCli(['--file', filePath, 'limit', 'set', 'groceries', '100', '--effective-from', '2026-09']);
+    expect(limit.status).toBe(0);
+
+    const status = runCli(['--file', filePath, 'status', '--period', '2026-08']);
+    expect(status.status).toBe(0);
+
+    const groceriesLine = status.stdout.split('\n').find((line) => line.includes('groceries'));
+    expect(groceriesLine).toBeDefined();
+    const [category, limitCol, carryCol, availableCol, spentCol, stateCol] = (groceriesLine ?? '')
+      .trim()
+      .split(/\s{2,}/);
+    expect(category).toBe('groceries');
+    expect(limitCol).toBe('n/a');
+    expect(carryCol).toBe('n/a');
+    expect(availableCol).toBe('n/a');
+    expect(spentCol).toBe('42.50');
+    expect(stateCol).toBe('unset');
+  });
+
   it('exits 1 with a one-line stderr message on a handled validation error', () => {
     expect(() =>
       execFileSync('node', [CLI_PATH, '--file', filePath, 'add', '-5', 'groceries', '--kind', 'expense'], {

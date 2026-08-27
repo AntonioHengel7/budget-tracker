@@ -26,6 +26,12 @@ export function Limits(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removed, setRemoved] = useState<CategoryBudget | null>(null);
+  // Guards against a double-click on the same row's Delete button firing two
+  // concurrent DELETE requests for the same category -- the second would
+  // 400 (category already gone) and surface a false failure alert even
+  // though the first delete succeeded. Per-category (not page-level) so
+  // deletes of *different* rows stay independent.
+  const [deletingCategory, setDeletingCategory] = useState<string | null>(null);
 
   async function refresh(): Promise<void> {
     try {
@@ -62,20 +68,28 @@ export function Limits(): React.JSX.Element {
   }
 
   async function handleRemove(removeCategory: string): Promise<void> {
+    if (deletingCategory === removeCategory) {
+      // A delete for this category is already in flight -- ignore the
+      // duplicate click instead of firing a second DELETE request.
+      return;
+    }
     const confirmed = window.confirm(
-      `Remove the limit for "${removeCategory}"? This cannot be undone.`,
+      `Remove ALL limit history for "${removeCategory}" (including any future-dated limits and its rollover setting)? This cannot be undone.`,
     );
     if (!confirmed) {
       return;
     }
     setRemoveError(null);
     setRemoved(null);
+    setDeletingCategory(removeCategory);
     try {
       const budget = await removeLimit(removeCategory);
       setRemoved(budget);
       await refresh();
     } catch (err) {
       setRemoveError(err instanceof Error ? err.message : 'failed to remove limit');
+    } finally {
+      setDeletingCategory(null);
     }
   }
 
@@ -144,38 +158,50 @@ export function Limits(): React.JSX.Element {
       ) : null}
 
       <h3>Current limits</h3>
+      {/* loadError and removeError can in principle both be non-null at once
+          (e.g. a remove fails right after a background refresh also fails),
+          rendering two role="alert" divs. Accepted edge case: every test
+          triggers at most one of these at a time, and a real UI need
+          (combining into one alert region) isn't demonstrated yet -- revisit
+          if that changes. */}
       {loadError !== null ? <div role="alert">{loadError}</div> : null}
       {removeError !== null ? <div role="alert">{removeError}</div> : null}
-      {limits.length === 0 ? (
-        <p>No limits set.</p>
-      ) : (
-        <div className="table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                <th>Category</th>
-                <th className="numeric">Current limit</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {limits.map((row) => (
-                <tr key={row.category}>
-                  <td>{row.category}</td>
-                  <td className="numeric">
-                    {row.state === 'unset' ? 'n/a' : formatMinor(row.limitMinor)}
-                  </td>
-                  <td>
-                    <button type="button" onClick={() => void handleRemove(row.category)}>
-                      Delete
-                    </button>
-                  </td>
+      {loadError === null ? (
+        limits.length === 0 ? (
+          <p>No limits set.</p>
+        ) : (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th className="numeric">Current limit</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {limits.map((row) => (
+                  <tr key={row.category}>
+                    <td>{row.category}</td>
+                    <td className="numeric">
+                      {row.state === 'unset' ? 'n/a' : formatMinor(row.limitMinor)}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        disabled={deletingCategory === row.category}
+                        onClick={() => void handleRemove(row.category)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : null}
 
       {removed !== null ? <p>Removed: {removed.category}</p> : null}
     </div>
