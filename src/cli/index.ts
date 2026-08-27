@@ -188,9 +188,9 @@ program
       }
       const rows = results.map((s) => [
         s.category,
-        formatSignedAmount(s.limitMinor),
-        formatSignedAmount(s.carryInMinor),
-        formatSignedAmount(s.availableMinor),
+        s.state === 'unset' ? 'n/a' : formatSignedAmount(s.limitMinor),
+        s.state === 'unset' ? 'n/a' : formatSignedAmount(s.carryInMinor),
+        s.state === 'unset' ? 'n/a' : formatSignedAmount(s.availableMinor),
         formatSignedAmount(s.spentMinor),
         s.state,
         formatPercent(s.pctUsed),

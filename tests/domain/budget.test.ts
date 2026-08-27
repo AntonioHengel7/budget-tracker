@@ -314,12 +314,25 @@ describe('budgetStatus', () => {
     expect(status.availableMinor).toBe(750);
   });
 
-  it('pctUsed is null when available === 0', () => {
+  it('state is "unset" (and pctUsed null) when queried before the limit takes effect', () => {
     // Query a period before any limit takes effect: limitMinor is 0 and
     // there is no carry yet, so availableMinor is 0.
     const status = budgetStatus(budget, [], '2025-12');
     expect(status.availableMinor).toBe(0);
     expect(status.pctUsed).toBeNull();
+    expect(status.state).toBe('unset');
+  });
+
+  it('state is "at" (not "unset") for a genuinely-configured $0 limit already in effect', () => {
+    const zeroLimitBudget = createCategoryBudget({
+      category: 'x',
+      rollover: false,
+      limits: [{ effectiveFrom: '2026-01', amountMinor: 0 }],
+    });
+    const status = budgetStatus(zeroLimitBudget, [], '2026-01');
+    expect(status.limitMinor).toBe(0);
+    expect(status.spentMinor).toBe(0);
+    expect(status.state).toBe('at');
   });
 
   // Regression (Socrates, PR #4 round 3 BLOCKING 2): availableMinor used to

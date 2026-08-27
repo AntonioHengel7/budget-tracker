@@ -165,4 +165,44 @@ describe('Dashboard stat tiles and status pills', () => {
       expect(cell).not.toHaveClass(statusClass);
     }
   });
+
+  // (#100) A category whose limit isn't in effect yet for the queried period
+  // must read as explicitly "not in effect", not as a $0 limit/available --
+  // the pill keeps the status-unset class (for the existing class-based test
+  // pattern above) but shows "not in effect" text, and the Limit/Available
+  // cells show 'n/a' instead of formatMinor(0). Spent stays real data.
+  it('shows "not in effect" and "n/a" limit/available cells for an unset budget row', async () => {
+    mockFetch(
+      [
+        {
+          period: '2026-08',
+          category: 'travel',
+          limitMinor: 0,
+          carryInMinor: 0,
+          availableMinor: 0,
+          spentMinor: 0,
+          state: 'unset',
+          pctUsed: null,
+        },
+      ],
+      { period: { period: '2026-08', incomeMinor: 0, expenseMinor: 0, netMinor: 0 }, byCategory: [] },
+    );
+
+    render(<Dashboard />);
+
+    const pill = await screen.findByText('not in effect');
+    expect(pill.tagName).toBe('SPAN');
+    expect(pill).toHaveClass('status-unset');
+
+    const cell = pill.closest('td');
+    expect(cell).not.toBeNull();
+    expect(cell?.tagName).toBe('TD');
+    expect(cell).not.toHaveClass('status-unset');
+
+    const naCells = screen.getAllByText('n/a');
+    expect(naCells).toHaveLength(2);
+    for (const naCell of naCells) {
+      expect(naCell.tagName).toBe('TD');
+    }
+  });
 });

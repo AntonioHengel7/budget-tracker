@@ -8,7 +8,14 @@ describe('Limits rollover field', () => {
   });
 
   function mockFetchEchoingBody(): ReturnType<typeof vi.fn> {
-    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      // Limits.tsx fetches the current limits list on mount (#100) -- an
+      // empty list keeps this file focused on the add form's rollover
+      // behavior without needing to model that list's contents.
+      if (url.includes('/api/status')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
       const body: unknown = init?.body !== undefined ? JSON.parse(init.body as string) : {};
       const parsed = body as { category?: string; rollover?: boolean };
       return Promise.resolve({
@@ -33,21 +40,31 @@ describe('Limits rollover field', () => {
     fireEvent.click(screen.getByRole('button', { name: /set limit/i }));
   }
 
+  // Limits.tsx also re-fetches /api/status (a bodyless GET) after mount and
+  // after every successful submit (#100) -- find the last call that actually
+  // carries a request body (the PUT itself) rather than assuming it's the
+  // chronologically last fetch call.
   function lastRequestBody(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
-    const calls = fetchMock.mock.calls;
-    const lastCall = calls[calls.length - 1] as [RequestInfo | URL, RequestInit | undefined];
-    const init = lastCall[1];
-    return JSON.parse(init?.body as string) as Record<string, unknown>;
+    const calls = fetchMock.mock.calls as [RequestInfo | URL, RequestInit | undefined][];
+    const putCalls = calls.filter(([, init]) => init?.body !== undefined);
+    const lastPutCall = putCalls[putCalls.length - 1];
+    return JSON.parse(lastPutCall?.[1]?.body as string) as Record<string, unknown>;
   }
 
-  // First call fails (so `handleSubmit`'s catch branch runs and the
-  // post-submit reset at ~36-37 never fires); every later call succeeds and
-  // echoes the request body back, like `mockFetchEchoingBody`.
+  // First PUT (i.e. first submit) fails (so `handleSubmit`'s catch branch
+  // runs and the post-submit reset at ~36-37 never fires); every later PUT
+  // succeeds and echoes the request body back, like `mockFetchEchoingBody`.
+  // GET /api/status (Limits.tsx's mount + post-submit refresh, #100) always
+  // succeeds with an empty list and is never counted as a "submit".
   function mockFetchFailingFirstCallThenEchoingBody(): ReturnType<typeof vi.fn> {
-    let callCount = 0;
-    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-      callCount += 1;
-      if (callCount === 1) {
+    let putCallCount = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/status')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      putCallCount += 1;
+      if (putCallCount === 1) {
         return Promise.resolve({
           ok: false,
           status: 400,
@@ -120,7 +137,8 @@ describe('Limits rollover field', () => {
     submit();
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Mount's GET /api/status (#100) plus the one failed PUT.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     // Switch to a different category without touching the checkbox. The
     // post-submit reset never ran (the submit failed), so only the

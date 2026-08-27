@@ -37,7 +37,7 @@ export interface CategoryBudget {
   readonly limits: readonly CategoryLimit[];
 }
 
-export type BudgetState = 'over' | 'at' | 'under';
+export type BudgetState = 'over' | 'at' | 'under' | 'unset';
 
 export interface PeriodBudgetStatus {
   readonly period: string;

@@ -318,7 +318,8 @@ tbody tr:nth-child(even) {
    status color as text -- a pill/chip instead of plain colored text. */
 .status-over,
 .status-at,
-.status-under {
+.status-under,
+.status-unset {
   display: inline-block;
   padding: 0.15rem 0.6rem;
   border-radius: 999px;
@@ -339,4 +340,9 @@ tbody tr:nth-child(even) {
 .status-under {
   color: var(--color-success);
   background: color-mix(in srgb, var(--color-success) 15%, transparent);
+}
+
+.status-unset {
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
 }

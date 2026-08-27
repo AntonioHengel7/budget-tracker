@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { removeLimit, setLimit, type CategoryBudget } from '../api.js';
+import { getStatus, removeLimit, setLimit, type CategoryBudget, type PeriodBudgetStatus } from '../api.js';
+import { formatMinor } from '../money.js';
 
 export function Limits(): React.JSX.Element {
   const [category, setCategory] = useState('');
@@ -21,9 +22,30 @@ export function Limits(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<CategoryBudget | null>(null);
 
-  const [removeCategory, setRemoveCategory] = useState('');
+  const [limits, setLimits] = useState<readonly PeriodBudgetStatus[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removed, setRemoved] = useState<CategoryBudget | null>(null);
+  // Guards against a double-click on the same row's Delete button firing two
+  // concurrent DELETE requests for the same category -- the second would
+  // 400 (category already gone) and surface a false failure alert even
+  // though the first delete succeeded. Per-category (not page-level) so
+  // deletes of *different* rows stay independent.
+  const [deletingCategory, setDeletingCategory] = useState<string | null>(null);
+
+  async function refresh(): Promise<void> {
+    try {
+      const result = await getStatus();
+      setLimits(result);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'failed to load limits');
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -39,21 +61,35 @@ export function Limits(): React.JSX.Element {
       setSaved(budget);
       setRollover(false);
       setRolloverTouched(false);
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to set limit');
     }
   }
 
-  async function handleRemoveSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  async function handleRemove(removeCategory: string): Promise<void> {
+    if (deletingCategory === removeCategory) {
+      // A delete for this category is already in flight -- ignore the
+      // duplicate click instead of firing a second DELETE request.
+      return;
+    }
+    const confirmed = window.confirm(
+      `Remove ALL limit history for "${removeCategory}" (including any future-dated limits and its rollover setting)? This cannot be undone.`,
+    );
+    if (!confirmed) {
+      return;
+    }
     setRemoveError(null);
     setRemoved(null);
+    setDeletingCategory(removeCategory);
     try {
       const budget = await removeLimit(removeCategory);
       setRemoved(budget);
-      setRemoveCategory('');
+      await refresh();
     } catch (err) {
       setRemoveError(err instanceof Error ? err.message : 'failed to remove limit');
+    } finally {
+      setDeletingCategory(null);
     }
   }
 
@@ -121,20 +157,51 @@ export function Limits(): React.JSX.Element {
         </p>
       ) : null}
 
-      <h3>Remove limit</h3>
-      <form onSubmit={(event) => void handleRemoveSubmit(event)}>
-        <label htmlFor="limit-remove-category">Category to remove</label>
-        <input
-          id="limit-remove-category"
-          type="text"
-          value={removeCategory}
-          onChange={(event) => setRemoveCategory(event.target.value)}
-          required
-        />
-
-        {removeError !== null ? <div role="alert">{removeError}</div> : null}
-        <button type="submit">Remove limit</button>
-      </form>
+      <h3>Current limits</h3>
+      {/* loadError and removeError can in principle both be non-null at once
+          (e.g. a remove fails right after a background refresh also fails),
+          rendering two role="alert" divs. Accepted edge case: every test
+          triggers at most one of these at a time, and a real UI need
+          (combining into one alert region) isn't demonstrated yet -- revisit
+          if that changes. */}
+      {loadError !== null ? <div role="alert">{loadError}</div> : null}
+      {removeError !== null ? <div role="alert">{removeError}</div> : null}
+      {loadError === null ? (
+        limits.length === 0 ? (
+          <p>No limits set.</p>
+        ) : (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th className="numeric">Current limit</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {limits.map((row) => (
+                  <tr key={row.category}>
+                    <td>{row.category}</td>
+                    <td className="numeric">
+                      {row.state === 'unset' ? 'n/a' : formatMinor(row.limitMinor)}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        disabled={deletingCategory === row.category}
+                        onClick={() => void handleRemove(row.category)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : null}
 
       {removed !== null ? <p>Removed: {removed.category}</p> : null}
     </div>
