@@ -48,6 +48,56 @@ INPUT=$(cat)
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""')
 
 # ---------------------------------------------------------------------------
+# _text_after_merge_match <cmd> — return the command text AFTER the one
+# real, word-boundary-anchored "gh pr merge" match (the same \b-anchored
+# pattern the STRUCTURAL INVARIANT counter below uses). Both extraction call
+# sites rely on _TOTAL_MERGES == 1 having already been verified by the time
+# they run, so exactly one such match exists.
+#
+# Must NOT use a plain (unanchored) `sed 's/.*gh...merge//'` strip here:
+# that pattern matches "gh pr merge" as a raw substring anywhere, including
+# inside an unrelated word like "ugh pr merge" (e.g. hidden in a trailing
+# shell comment after a real merge command) — and greedy `.*` extends
+# through the LAST such occurrence, silently returning text from the FAKE
+# occurrence instead of the real one. That let a single crafted command
+# (e.g. `gh pr merge 103 --squash # ugh pr merge 99`) point the PR-number/
+# --repo extraction at an attacker-chosen PR/repo while the real, earlier
+# `gh pr merge` in the same string still executed against its own,
+# unverified target — a verified gate bypass (Hobbes, budget-tracker PR
+# #103, 2026-08-27).
+#
+# grep -boE (with \b) is used instead of sed because BSD sed (macOS) does
+# not support \b at all — it silently fails to match, verified empirically
+# — while grep -E's \b works correctly on both GNU and BSD.
+#
+# Locating the right START of the tail isn't sufficient on its own: the
+# returned text is walked token-by-token below (PR number / --repo) with no
+# concept of "where the real command's own argument list ends," so it must
+# also be bounded to stop at the first shell separator/comment character
+# (`;`, `&`, `|`, `#`, newline) — otherwise a trailing `# ...decoy -R x` (or
+# even `; rm -rf ... -R x`, no second "gh pr merge" required) still gets
+# walked as if it were live arguments to the real command.
+# ---------------------------------------------------------------------------
+_text_after_merge_match() {
+  local cmd="$1"
+  local match_info match_offset match_text match_len tail
+  match_info=$(printf '%s' "$cmd" | grep -boE '\bgh[[:space:]]+pr[[:space:]]+merge\b' | head -1)
+  match_offset="${match_info%%:*}"
+  match_text="${match_info#*:}"
+  match_len=${#match_text}
+  tail="${cmd:$((match_offset + match_len))}"
+  # Bound to the real command's own arguments — stop at the first
+  # separator/comment char, whichever comes first (order among these four
+  # truncations doesn't matter: each only shortens the string further).
+  tail="${tail%%;*}"
+  tail="${tail%%&*}"
+  tail="${tail%%|*}"
+  tail="${tail%%#*}"
+  tail="${tail%%$'\n'*}"
+  printf '%s' "$tail"
+}
+
+# ---------------------------------------------------------------------------
 # STRUCTURAL INVARIANT: count ALL merge actions in the command.
 #
 # Two forms are counted:
@@ -114,7 +164,7 @@ REPO_ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
 # the command always wins; otherwise derive the default below from
 # REPO_ROOT's own git remote.
 CROSS_REPO=""
-_EXTRACT_AFTER=$(printf '%s' "$COMMAND" | sed 's/.*gh[[:space:]]\{1,\}pr[[:space:]]\{1,\}merge//')
+_EXTRACT_AFTER=$(_text_after_merge_match "$COMMAND")
 _SKIP_R=0
 while IFS= read -r _RT; do
   [ -z "$_RT" ] && continue
@@ -170,7 +220,7 @@ extract_pr_number() {
 
   # Extract the segment after "gh pr merge", collapsing whitespace.
   local after
-  after=$(printf '%s' "$cmd" | sed 's/.*gh[[:space:]]\{1,\}pr[[:space:]]\{1,\}merge//')
+  after=$(_text_after_merge_match "$cmd")
 
   # Tokenise (xargs strips shell quoting and splits on whitespace).
   local -a tokens=()
