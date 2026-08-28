@@ -70,31 +70,68 @@ COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""')
 # not support \b at all — it silently fails to match, verified empirically
 # — while grep -E's \b works correctly on both GNU and BSD.
 #
-# Locating the right START of the tail isn't sufficient on its own: the
-# returned text is walked token-by-token below (PR number / --repo) with no
-# concept of "where the real command's own argument list ends," so it must
-# also be bounded to stop at the first shell separator/comment character
-# (`;`, `&`, `|`, `#`, newline) — otherwise a trailing `# ...decoy -R x` (or
-# even `; rm -rf ... -R x`, no second "gh pr merge" required) still gets
-# walked as if it were live arguments to the real command.
+# `local LC_ALL=C` is load-bearing, not cosmetic: `grep -bo` reports a BYTE
+# offset, but bash's `${cmd:offset}` slices by CHARACTER under any UTF-8
+# locale (the default) — every multibyte char before the match shifts the
+# tail's start rightward, silently chopping leading digits off the real PR
+# number (e.g. a stray non-ASCII char earlier in the command turned PR 1200
+# into extracted "200"). Forcing the whole function into the C locale makes
+# "byte" and "character" the same unit throughout, so the offset arithmetic
+# is internally consistent regardless of what the rest of the command
+# contains. `local` scopes the override to just this function call.
+# (Socrates + Hobbes, budget-tracker PR #103, 2026-08-27 — both indepen-
+# dently found this exact mismatch in the first fix attempt, which computed
+# the offset without any locale control.)
+#
+# This function does NOT bound the returned text to end at a shell
+# separator/comment character — callers must do that themselves by
+# stopping their own token walk at a separator TOKEN (see
+# _is_command_separator below), not by truncating raw characters here.
+# Character-level truncation before tokenizing was tried first and had to
+# be reverted: it truncates INSIDE a legitimately quoted flag value too
+# (e.g. `--subject "Sync gate (#98)"` or `-R other/repo` following a body
+# containing `&`), silently dropping real arguments — including, ironically,
+# `#98`-style issue references, which this repo's own commit-msg convention
+# requires. Tokenizing first (via xargs, which already respects quoting)
+# and stopping at a separator TOKEN preserves quoted content correctly.
 # ---------------------------------------------------------------------------
 _text_after_merge_match() {
+  local LC_ALL=C
   local cmd="$1"
-  local match_info match_offset match_text match_len tail
+  local match_info match_offset match_text match_len
   match_info=$(printf '%s' "$cmd" | grep -boE '\bgh[[:space:]]+pr[[:space:]]+merge\b' | head -1)
   match_offset="${match_info%%:*}"
   match_text="${match_info#*:}"
   match_len=${#match_text}
-  tail="${cmd:$((match_offset + match_len))}"
-  # Bound to the real command's own arguments — stop at the first
-  # separator/comment char, whichever comes first (order among these four
-  # truncations doesn't matter: each only shortens the string further).
-  tail="${tail%%;*}"
-  tail="${tail%%&*}"
-  tail="${tail%%|*}"
-  tail="${tail%%#*}"
-  tail="${tail%%$'\n'*}"
-  printf '%s' "$tail"
+  printf '%s' "${cmd:$((match_offset + match_len))}"
+}
+
+# ---------------------------------------------------------------------------
+# _is_command_separator <token> — true if a token produced by `xargs -n1`
+# tokenizing (which already respects shell quoting) is itself an unquoted
+# shell separator/comment marker: `;`, `&`, `&&`, `|`, `||`, or starts with
+# `#`. Callers walking tokens from _text_after_merge_match's output must
+# stop (not process) at the first such token — everything after it belongs
+# to a different clause than the real `gh pr merge` invocation, whether
+# that's a chained command or an inert trailing comment.
+#
+# Because xargs groups quoted content into a single token, a separator
+# character that appeared INSIDE quotes in the original command (e.g. the
+# `#` in `--subject "Sync gate (#98)"`) is never seen here as its own
+# token — it stays embedded in the quoted token, correctly NOT treated as a
+# boundary. A bare, unquoted separator with no surrounding whitespace
+# (e.g. `7;echo`) is not detected as a boundary either, since xargs's
+# whitespace-based splitting won't isolate it as its own token — that
+# obfuscated-compound-command shape is accepted as out of scope, per this
+# file's own documented carve-out for "a determined caller using compound
+# commands."
+# ---------------------------------------------------------------------------
+_is_command_separator() {
+  case "$1" in
+    ';'|'&'|'&&'|'|'|'||') return 0 ;;
+    '#'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -168,6 +205,7 @@ _EXTRACT_AFTER=$(_text_after_merge_match "$COMMAND")
 _SKIP_R=0
 while IFS= read -r _RT; do
   [ -z "$_RT" ] && continue
+  _is_command_separator "$_RT" && break
   if [ "$_SKIP_R" -eq 1 ]; then
     CROSS_REPO="$_RT"
     break
@@ -239,15 +277,33 @@ extract_pr_number() {
       continue
     fi
 
+    _is_command_separator "$tok" && break
+
     # Skip flag tokens (start with -); track value-taking ones.
     if [[ "$tok" == -* ]]; then
       # These flags take a SEPARATE next argument (not embedded via '=').
-      # --body-file/-F and --subject/-t also take a value; their numeric
-      # arguments must not be mistaken for the PR number.
+      # Full value-taking set per `gh pr merge --help`: -A/--author-email,
+      # -b/--body, -F/--body-file, -t/--subject, --match-head-commit,
+      # -R/--repo. (Hobbes, budget-tracker PR #103, 2026-08-27: -A was
+      # missing here, so `gh pr merge -A 200 1200` read 200 as the PR
+      # number when gh itself treats 1200 as the real target.)
       case "$tok" in
-        --body|-b|--body-file|-F|--subject|-t|--match-head-commit|--repo|-R)
-          _skip_next=1 ;;
+        --body|-b|--body-file|-F|--subject|-t|--match-head-commit|--repo|-R|--author-email|-A)
+          _skip_next=1 ; continue ;;
       esac
+      # Long flags (--foo) with no recognized value are safe to skip
+      # outright — they're a fixed, closed vocabulary in `gh pr merge`.
+      # A SHORT flag CLUSTER (-xyz, 2+ letters after a single dash) is not
+      # safe to skip blindly: gh/pflag lets the last letter in a cluster
+      # take a value (e.g. `-sb 200` means -s, then -b consumes "200"),
+      # and this parser has no general decomposition logic for that.
+      # Rather than guess which reading is right, FAIL CLOSED on any
+      # cluster shape this doesn't explicitly recognize (Hobbes: a naive
+      # skip-and-continue on `-sb 200 1200` misread 200 as the PR number
+      # instead of the real target, 1200).
+      if [[ "$tok" =~ ^-[A-Za-z][A-Za-z]+$ ]]; then
+        return 1
+      fi
       continue
     fi
 
