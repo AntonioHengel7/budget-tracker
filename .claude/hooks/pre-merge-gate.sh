@@ -318,6 +318,18 @@ extract_pr_number() {
       printf '%s' "$tok"
       return 0
     fi
+
+    # A non-flag, non-numeric positional token here is a PR URL or branch
+    # name — `gh pr merge`'s selector is documented as
+    # `[<number> | <url> | <branch>]`, and both of those forms are ordinary,
+    # ungimmicked usage, not an obfuscation trick. This parser has no way to
+    # resolve either to a definite PR number, so it's AMBIGUOUS (return 2),
+    # not "no PR given" (return 1) — the same conflation already fixed for
+    # flag clusters applies here too: falling through to the flag-less
+    # fallback would verify the CURRENT BRANCH's PR while `gh` merges
+    # whatever the URL/branch actually points at (Socrates, budget-tracker
+    # PR #103, 2026-08-27 — reproduced with `gh pr merge <url-for-999>`).
+    return 2
   done
   return 1
 }
