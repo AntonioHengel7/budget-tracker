@@ -297,12 +297,18 @@ extract_pr_number() {
       # safe to skip blindly: gh/pflag lets the last letter in a cluster
       # take a value (e.g. `-sb 200` means -s, then -b consumes "200"),
       # and this parser has no general decomposition logic for that.
-      # Rather than guess which reading is right, FAIL CLOSED on any
-      # cluster shape this doesn't explicitly recognize (Hobbes: a naive
-      # skip-and-continue on `-sb 200 1200` misread 200 as the PR number
-      # instead of the real target, 1200).
+      # Rather than guess which reading is right, this is AMBIGUOUS — return
+      # 2, a distinct exit code from "return 1: no PR number token at all."
+      # Collapsing both into one signal (both previously returned 1) was
+      # itself a bypass: the caller treated an ambiguous cluster exactly
+      # like the legitimate flag-less form and fell through to resolving
+      # the CURRENT BRANCH's PR — verifying an entirely different PR's
+      # verdicts/CI while `gh pr merge -sd 999` (an utterly ordinary
+      # `--squash --delete-branch` command) actually merged #999 (Hobbes +
+      # Socrates, budget-tracker PR #103, 2026-08-27, independently
+      # reproduced end-to-end with `gh pr merge -sd 999` / `-sb x 999`).
       if [[ "$tok" =~ ^-[A-Za-z][A-Za-z]+$ ]]; then
-        return 1
+        return 2
       fi
       continue
     fi
@@ -316,7 +322,20 @@ extract_pr_number() {
   return 1
 }
 
-PR_NUM=$(extract_pr_number "$COMMAND" 2>/dev/null || true)
+set +e
+PR_NUM=$(extract_pr_number "$COMMAND" 2>/dev/null)
+_EXTRACT_STATUS=$?
+set -e
+
+# Ambiguous (exit 2) is NOT the same as "no PR number given" (exit 1) — an
+# ambiguous parse must fail closed immediately. Falling through to the
+# flag-less branch-resolution fallback here would verify whatever PR is
+# open on the CURRENT branch, not the PR the real command actually merges.
+if [ "$_EXTRACT_STATUS" -eq 2 ]; then
+  echo "ERROR: gh pr merge blocked — command contains an unrecognized flag shape (e.g. a clustered short flag like -sd) that cannot be safely parsed for a PR number." >&2
+  echo "  Use explicit long flags instead: gh pr merge <N> --squash --delete-branch" >&2
+  exit 2
+fi
 
 if [ -z "$PR_NUM" ]; then
   # No inline PR number — flag-less `gh pr merge` form: resolve the current
