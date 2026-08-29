@@ -4,6 +4,7 @@ import {
   assertValidUsername,
   InvalidUsernameError,
   isValidUsername,
+  resolveSignupPath,
   resolveUserStorePath,
 } from '../../src/server/paths.js';
 
@@ -37,6 +38,28 @@ describe('resolveUserStorePath', () => {
 
   it('InvalidUsernameError extends this repo\'s DomainError, so it maps to a 400 not an unhandled 500', () => {
     expect(new InvalidUsernameError('bad username')).toBeInstanceOf(DomainError);
+  });
+});
+
+describe('resolveSignupPath', () => {
+  it('resolves a valid username to <signupsDir>/<username>.json', () => {
+    expect(resolveSignupPath('/data/signups', 'antonio')).toBe('/data/signups/antonio.json');
+  });
+
+  it('preserves case, treating usernames differing only in case as distinct', () => {
+    expect(resolveSignupPath('/data/signups', 'Antonio')).not.toBe(
+      resolveSignupPath('/data/signups', 'antonio'),
+    );
+  });
+
+  it.each([
+    ['empty string', ''],
+    ['path traversal', '../../etc/passwd'],
+    ['contains a slash', 'a/b'],
+    ['contains a dot', 'antonio.json'],
+    ['too long', 'a'.repeat(33)],
+  ])('rejects %s', (_label, username) => {
+    expect(() => resolveSignupPath('/data/signups', username)).toThrow(InvalidUsernameError);
   });
 });
 

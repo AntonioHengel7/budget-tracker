@@ -47,3 +47,18 @@ export function resolveUserStorePath(dataDir: string, username: string): string 
   assertValidUsername(username);
   return join(dataDir, `${username}.json`);
 }
+
+/**
+ * Resolves the per-account signup record path for a given username, e.g.
+ * `resolveSignupPath('/data/signups', 'antonio')` -> `/data/signups/antonio.json`.
+ * Same shape and same rationale as `resolveUserStorePath` above -- rejects
+ * any username that doesn't match the canonical allowed shape, which is what
+ * keeps path traversal and other unsafe filenames out entirely. Callers pass
+ * the already-computed `signups/` subdirectory (see `app.ts`'s `signupsDir`),
+ * not `dataDir` itself, so signup records and budget store files never share
+ * a directory or a filename collision.
+ */
+export function resolveSignupPath(signupsDir: string, username: string): string {
+  assertValidUsername(username);
+  return join(signupsDir, `${username}.json`);
+}

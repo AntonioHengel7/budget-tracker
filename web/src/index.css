@@ -214,6 +214,25 @@ label {
   background: var(--color-border);
 }
 
+/* The "Sign up"/"Log in" cross-links between Login.tsx and Signup.tsx (#104). */
+.auth-switch {
+  margin: 0.75rem 0 0;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+/* A button styled to read as an inline text link, not a button -- used for
+   the auth-switch cross-links above and Verify.tsx's "back to login" link. */
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-link, inherit);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
 /* Tables have a wide min-content width (many columns) that doesn't fit
    narrow mobile viewports (issue #77: 34px overflow at 320px, 74px at
    280px). Wrapping the table in this scrollable container confines the

@@ -4,9 +4,11 @@ import { ApiError, login, startDemo } from '../api.js';
 
 export interface LoginProps {
   readonly onLoggedIn: (username: string) => void;
+  /** Optional so every existing caller (e.g. tests rendering <Login> alone) keeps working unchanged. */
+  readonly onSwitchToSignup?: () => void;
 }
 
-export function Login({ onLoggedIn }: LoginProps): React.JSX.Element {
+export function Login({ onLoggedIn, onSwitchToSignup }: LoginProps): React.JSX.Element {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +73,14 @@ export function Login({ onLoggedIn }: LoginProps): React.JSX.Element {
         {error !== null ? <div role="alert">{error}</div> : null}
         <button type="submit">Log in</button>
       </form>
+      {onSwitchToSignup !== undefined ? (
+        <p className="auth-switch">
+          Don&apos;t have an account?{' '}
+          <button type="button" className="link-button" onClick={onSwitchToSignup}>
+            Sign up
+          </button>
+        </p>
+      ) : null}
       <div className="login-divider">
         <span>or</span>
       </div>

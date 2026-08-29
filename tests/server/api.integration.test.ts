@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/server/app.js';
 import { emptyStore } from '../../src/storage/schema.js';
 
@@ -541,6 +541,304 @@ describe('web API', () => {
       // helmet includes this directive by default; only an explicit `null`
       // override (see createApp's helmet config) removes it entirely.
       expect(csp).not.toMatch(/upgrade-insecure-requests/);
+    });
+  });
+
+  // #104: self-service signup with email verification.
+  describe('self-service signup', () => {
+    function createSignupApp(
+      signupOverrides: Record<string, unknown> = {},
+      sendEmail: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(undefined),
+    ): { signupApp: ReturnType<typeof createApp>; sendEmail: ReturnType<typeof vi.fn> } {
+      const signupApp = createApp({
+        dataDir,
+        credentials: [{ username: 'antonio', passwordHash }],
+        sessionSecret: 'test-secret',
+        insecureCookies: true,
+        signup: {
+          fromAddress: 'noreply@example.com',
+          publicAppUrl: 'https://budget.example.com',
+          sendEmail,
+          ...signupOverrides,
+        },
+      });
+      return { signupApp, sendEmail };
+    }
+
+    function extractVerifyLink(sendEmail: ReturnType<typeof vi.fn>): { username: string; token: string } {
+      const call = sendEmail.mock.calls[0]?.[0] as { html: string } | undefined;
+      expect(call).toBeDefined();
+      const match = /href="([^"]+)"/.exec(call?.html ?? '');
+      expect(match).not.toBeNull();
+      const url = new URL(match?.[1] ?? '');
+      const username = url.searchParams.get('username');
+      const token = url.searchParams.get('token');
+      expect(username).not.toBeNull();
+      expect(token).not.toBeNull();
+      return { username: username ?? '', token: token ?? '' };
+    }
+
+    it('responds 503 for /api/signup and /api/verify when config.signup is undefined', async () => {
+      const signupRes = await request(app)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      expect(signupRes.status).toBe(503);
+      expect(signupRes.body).toEqual({ error: 'self-service signup is not enabled' });
+
+      const verifyRes = await request(app).post('/api/verify').send({ username: 'newuser', token: 'x' });
+      expect(verifyRes.status).toBe(503);
+      expect(verifyRes.body).toEqual({ error: 'self-service signup is not enabled' });
+    });
+
+    it('leaves /api/login byte-for-byte identical (still a plain 401) for an unknown user when signup is disabled', async () => {
+      const res = await request(app).post('/api/login').send({ username: 'nobody', password: 'whatever' });
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'invalid credentials' });
+    });
+
+    it('signup happy path: creates an unverified record and sends a verification email', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      const res = await request(signupApp).post('/api/signup').send({
+        username: 'newuser',
+        email: 'New.User@Example.com',
+        password: 'longenoughpassword',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ message: 'check your email to verify your account' });
+      expect(sendEmail).toHaveBeenCalledTimes(1);
+      const emailArgs = sendEmail.mock.calls[0]?.[0] as { to: string; subject: string };
+      expect(emailArgs.to).toBe('new.user@example.com');
+      expect(emailArgs.subject).toBe('Verify your budget-tracker account');
+
+      const stored = JSON.parse(await readFile(join(dataDir, 'signups', 'newuser.json'), 'utf-8'));
+      expect(stored.verified).toBe(false);
+      expect(stored.email).toBe('new.user@example.com');
+      expect(stored.passwordHash).not.toBe('longenoughpassword');
+    });
+
+    it('rejects a duplicate username against AUTH_USERS_JSON with 409', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp).post('/api/signup').send({
+        username: 'antonio',
+        email: 'other@example.com',
+        password: 'longenoughpassword',
+      });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'username already taken' });
+    });
+
+    it('rejects a duplicate username against an already-verified signup with 409', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+      await request(signupApp).post('/api/verify').send({ username, token });
+
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'b@example.com', password: 'longenoughpassword' });
+      expect(res.status).toBe(409);
+    });
+
+    it('responds with the identical success message for a duplicate email, writing no file and sending no email', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'first', email: 'shared@example.com', password: 'longenoughpassword' });
+      sendEmail.mockClear();
+
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'second', email: 'shared@example.com', password: 'longenoughpassword' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ message: 'check your email to verify your account' });
+      expect(sendEmail).not.toHaveBeenCalled();
+      await expect(access(join(dataDir, 'signups', 'second.json'))).rejects.toThrow();
+    });
+
+    it('returns 503 once the unverified-signup cap is reached', async () => {
+      const { signupApp } = createSignupApp({ unverifiedCap: 1 });
+      const first = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'first', email: 'first@example.com', password: 'longenoughpassword' });
+      expect(first.status).toBe(200);
+
+      const second = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'second', email: 'second@example.com', password: 'longenoughpassword' });
+      expect(second.status).toBe(503);
+      expect(second.body).toEqual({ error: 'signups are temporarily unavailable, try again later' });
+    });
+
+    it('a resend/retry for the same unverified username overwrites the record without counting against the cap', async () => {
+      const { signupApp, sendEmail } = createSignupApp({ unverifiedCap: 1 });
+      const first = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'first@example.com', password: 'longenoughpassword' });
+      expect(first.status).toBe(200);
+
+      const resend = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'second@example.com', password: 'longenoughpassword' });
+      expect(resend.status).toBe(200);
+      expect(sendEmail).toHaveBeenCalledTimes(2);
+
+      const stored = JSON.parse(await readFile(join(dataDir, 'signups', 'newuser.json'), 'utf-8'));
+      expect(stored.email).toBe('second@example.com');
+    });
+
+    it('verify happy path: flips the record to verified and allows login afterward', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+
+      const verifyRes = await request(signupApp).post('/api/verify').send({ username, token });
+      expect(verifyRes.status).toBe(200);
+      expect(verifyRes.body).toEqual({ message: 'verified', username: 'newuser' });
+
+      const loginRes = await request(signupApp)
+        .post('/api/login')
+        .send({ username: 'newuser', password: 'longenoughpassword' });
+      expect(loginRes.status).toBe(200);
+      expect(loginRes.body).toEqual({ username: 'newuser' });
+      const cookies = loginRes.headers['set-cookie'] as unknown as string[];
+      expect(cookies.some((c) => c.startsWith('session=') && c.includes('HttpOnly'))).toBe(true);
+    });
+
+    it('is idempotent on an already-verified account', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+      await request(signupApp).post('/api/verify').send({ username, token });
+
+      const secondClick = await request(signupApp).post('/api/verify').send({ username, token });
+      expect(secondClick.status).toBe(200);
+      expect(secondClick.body).toEqual({ message: 'already verified', username: 'newuser' });
+    });
+
+    it('rejects an expired verification token with 400', async () => {
+      const { signupApp, sendEmail } = createSignupApp({ tokenTtlMs: 1 });
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const res = await request(signupApp).post('/api/verify').send({ username, token });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'verification link expired, sign up again' });
+    });
+
+    it('rejects a wrong verification token with 400', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username } = extractVerifyLink(sendEmail);
+
+      const res = await request(signupApp).post('/api/verify').send({ username, token: 'not-the-right-token' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'invalid or expired verification link' });
+    });
+
+    it('rejects verification for an unknown username with 400', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp).post('/api/verify').send({ username: 'nobody', token: 'whatever' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'invalid or expired verification link' });
+    });
+
+    it('login responds 403 for an unverified account and sets no session cookie', async () => {
+      const { signupApp } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+
+      const res = await request(signupApp)
+        .post('/api/login')
+        .send({ username: 'newuser', password: 'longenoughpassword' });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'please verify your email before logging in' });
+      expect(res.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('login falls through to the generic 401 for a signup account given the wrong password', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+      await request(signupApp).post('/api/verify').send({ username, token });
+
+      const res = await request(signupApp).post('/api/login').send({ username: 'newuser', password: 'wrong' });
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'invalid credentials' });
+    });
+
+    it('rejects a username starting with the reserved demo- prefix', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'demo-abc', email: 'a@example.com', password: 'longenoughpassword' });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects a password shorter than 8 characters', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'short' });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects a malformed email address', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'not-an-email', password: 'longenoughpassword' });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects signup for a username that already has a budget data file', async () => {
+      await writeFile(join(dataDir, 'orphan.json'), JSON.stringify(emptyStore()), 'utf-8');
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'orphan', email: 'a@example.com', password: 'longenoughpassword' });
+      expect(res.status).toBe(409);
+    });
+
+    it('rate-limits repeated /api/signup requests from the same IP', async () => {
+      const { signupApp } = createSignupApp({ rateLimit: { windowMs: 60_000, max: 2 } });
+      const agent = request.agent(signupApp);
+      for (let i = 0; i < 2; i += 1) {
+        const res = await agent
+          .post('/api/signup')
+          .send({ username: `user${i}`, email: `user${i}@example.com`, password: 'longenoughpassword' });
+        expect(res.status).toBe(200);
+      }
+      const limited = await agent
+        .post('/api/signup')
+        .send({ username: 'user3', email: 'user3@example.com', password: 'longenoughpassword' });
+      expect(limited.status).toBe(429);
+    });
+
+    it('maps a sendEmail failure to a 500, not an unhandled rejection', async () => {
+      const { signupApp } = createSignupApp({}, vi.fn().mockRejectedValue(new Error('resend is down')));
+
+      const res = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'internal server error' });
     });
   });
 });

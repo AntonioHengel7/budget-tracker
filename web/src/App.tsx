@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
 import { logout, me } from './api.js';
 import { Login } from './pages/Login.js';
+import { Signup } from './pages/Signup.js';
+import { Verify } from './pages/Verify.js';
 import { Dashboard } from './pages/Dashboard.js';
 import { Transactions } from './pages/Transactions.js';
 import { Limits } from './pages/Limits.js';
 import { ThemeToggle } from './ThemeToggle.js';
 
 type View = 'dashboard' | 'transactions' | 'limits';
+type AuthMode = 'login' | 'signup';
 type AuthState = { readonly status: 'checking' } | { readonly status: 'loggedOut' } | {
   readonly status: 'loggedIn';
   readonly username: string;
@@ -15,6 +18,7 @@ type AuthState = { readonly status: 'checking' } | { readonly status: 'loggedOut
 export function App(): React.JSX.Element {
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   const [view, setView] = useState<View>('dashboard');
+  const [mode, setMode] = useState<AuthMode>('login');
 
   useEffect(() => {
     me()
@@ -24,6 +28,23 @@ export function App(): React.JSX.Element {
 
   function handleLoggedIn(username: string): void {
     setAuth({ status: 'loggedIn', username });
+  }
+
+  // #104: the server's existing SPA fallback already serves index.html for
+  // any non-/api path, including /verify -- no server routing change is
+  // needed. Rendered unconditionally, ahead of every auth.status branch
+  // below, since a verification link can be clicked whether or not the
+  // browser happens to already hold an unrelated logged-in session.
+  const isVerifyRoute = window.location.pathname === '/verify';
+  if (isVerifyRoute) {
+    return (
+      <div className="pre-auth-shell">
+        <div className="theme-toggle-corner">
+          <ThemeToggle />
+        </div>
+        <Verify />
+      </div>
+    );
   }
 
   async function handleLogout(): Promise<void> {
@@ -51,7 +72,11 @@ export function App(): React.JSX.Element {
         <div className="theme-toggle-corner">
           <ThemeToggle />
         </div>
-        <Login onLoggedIn={handleLoggedIn} />
+        {mode === 'login' ? (
+          <Login onLoggedIn={handleLoggedIn} onSwitchToSignup={() => setMode('signup')} />
+        ) : (
+          <Signup onSwitchToLogin={() => setMode('login')} />
+        )}
       </div>
     );
   }
