@@ -20,16 +20,28 @@ export interface SignupRecord {
   /** ISO 8601, or `null` once `verified` is `true`. */
   readonly verifiedAt: string | null;
   /**
-   * SHA-256 hex digest of the raw verification token, or `null` once
-   * `verified` is `true`. Deliberately NOT bcrypt: bcrypt's slow-hash cost
-   * exists to defend a human-guessable secret (a password) against offline
-   * brute force. A verification token is `randomBytes(32)` -- 256 bits of
-   * entropy, already computationally infeasible to guess or brute-force --
-   * so hashing it with bcrypt would only add latency on every verification
-   * click with zero corresponding security benefit. `BCRYPT_COST` stays
-   * reserved for passwords only.
+   * SHA-256 hex digest of the raw verification token. Deliberately NOT
+   * bcrypt: bcrypt's slow-hash cost exists to defend a human-guessable
+   * secret (a password) against offline brute force. A verification token is
+   * `randomBytes(32)` -- 256 bits of entropy, already computationally
+   * infeasible to guess or brute-force -- so hashing it with bcrypt would
+   * only add latency on every verification click with zero corresponding
+   * security benefit. `BCRYPT_COST` stays reserved for passwords only.
+   *
+   * Persists unchanged after `verified` becomes `true` -- it is
+   * deliberately NOT cleared on verification. `/api/verify` is idempotent: a
+   * second click on the same original emailed link must still resolve to the
+   * `200 already verified` response rather than an error, which requires the
+   * original token to still match. Clearing this field on verification would
+   * break that idempotency (see `/api/verify`'s handler in `app.ts` for the
+   * ordering this depends on).
    */
   readonly verificationTokenHash: string | null;
-  /** ISO 8601, or `null` once `verified` is `true`. */
+  /**
+   * ISO 8601. Persists unchanged after `verified` becomes `true`, for the
+   * same idempotency reason as `verificationTokenHash` above -- note this
+   * means a verified record's original token has no effective expiry, since
+   * `/api/verify`'s `verified` early-return precedes the expiry check.
+   */
   readonly verificationTokenExpiresAt: string | null;
 }

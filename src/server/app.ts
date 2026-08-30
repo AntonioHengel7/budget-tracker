@@ -813,10 +813,11 @@ export function createApp(config: AppConfig): Express {
         }
       }
 
-      // Hashed unconditionally, even on the anti-enumeration duplicate-email
-      // path below that discards it -- so every successful-shaped request
-      // pays the same bcrypt cost regardless of whether the email turns out
-      // to be a duplicate.
+      // Hashed unconditionally on every request -- including the resend path,
+      // which never uses this value (see isResend branch below) -- and the
+      // anti-enumeration duplicate-email path below that discards it, so
+      // every successful-shaped request pays the same bcrypt cost regardless
+      // of which branch it actually takes.
       const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
       const emailOwner = await findSignupByEmail(signupsDir, normalizedEmail);
       // A DIFFERENT username already owns this email -- a resend under the
@@ -827,24 +828,43 @@ export function createApp(config: AppConfig): Express {
         const token = randomBytes(32).toString('hex');
         const verificationTokenHash = createHash('sha256').update(token).digest('hex');
         const tokenTtlMs = signupConfig.tokenTtlMs ?? DEFAULT_SIGNUP_TOKEN_TTL_MS;
-        const record: SignupRecord = {
-          schemaVersion: SIGNUP_SCHEMA_VERSION,
-          username,
-          email: normalizedEmail,
-          passwordHash,
-          verified: false,
-          // A resend restarts the unverified-account TTL clock for this
-          // user's own retry -- simpler than tracking two separate
-          // timestamps, and a reasonable behavior for a self-initiated retry.
-          createdAt: new Date().toISOString(),
-          verifiedAt: null,
-          verificationTokenHash,
-          verificationTokenExpiresAt: new Date(Date.now() + tokenTtlMs).toISOString(),
-        };
+        // A resend restarts the unverified-account TTL clock for this
+        // user's own retry -- simpler than tracking two separate
+        // timestamps, and a reasonable behavior for a self-initiated retry.
+        const createdAt = new Date().toISOString();
+        const verificationTokenExpiresAt = new Date(Date.now() + tokenTtlMs).toISOString();
 
-        if (isResend) {
-          await overwriteSignup(signupsDir, record);
+        if (isResend && existingSignup !== null) {
+          // A resend must prove nothing and change nothing except the
+          // token/expiry -- it carries the STORED email and passwordHash
+          // forward rather than the request's. Given the email-match gate
+          // above, the request's email is already confirmed identical to
+          // existingSignup.email, but the password must never come from this
+          // request: using the request's freshly-hashed passwordHash here
+          // would let anyone who merely knows a victim's pending username and
+          // email (not secret) silently replace the victim's password while
+          // the re-sent verification link still goes to the victim's own
+          // inbox -- a full account takeover the victim's own click would
+          // complete. bcrypt.hash above still runs unconditionally for timing
+          // uniformity; its result is simply never used on this branch.
+          await overwriteSignup(signupsDir, {
+            ...existingSignup,
+            createdAt,
+            verificationTokenHash,
+            verificationTokenExpiresAt,
+          });
         } else {
+          const record: SignupRecord = {
+            schemaVersion: SIGNUP_SCHEMA_VERSION,
+            username,
+            email: normalizedEmail,
+            passwordHash,
+            verified: false,
+            createdAt,
+            verifiedAt: null,
+            verificationTokenHash,
+            verificationTokenExpiresAt,
+          };
           const result = await createSignupExclusive(signupsDir, record);
           if (result === 'exists') {
             // Lost a race against a concurrent signup for the same username

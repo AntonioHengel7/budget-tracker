@@ -125,6 +125,19 @@ describe('signupStore', () => {
       await overwriteSignup(signupsDir, updated);
       await expect(readSignup(signupsDir, 'antonio')).resolves.toEqual(updated);
     });
+
+    // Pins the temp-file+rename() rewrite: reverting to a direct writeFile
+    // onto the final path wouldn't fail this test on a successful write, but
+    // this at least locks in that the temp file is always cleaned up rather
+    // than left behind -- mirrors createSignupExclusive's own
+    // "never leaves a stray .tmp file" test above.
+    it('never leaves a stray .tmp file behind after a successful overwrite', async () => {
+      await createSignupExclusive(signupsDir, makeRecord({ email: 'old@example.com' }));
+      await overwriteSignup(signupsDir, makeRecord({ email: 'new@example.com' }));
+
+      const entries = await readdir(signupsDir);
+      expect(entries).toEqual(['antonio.json']);
+    });
   });
 
   describe('findSignupByUsernameCaseFold', () => {
@@ -196,6 +209,20 @@ describe('signupStore', () => {
       expect(result.unverifiedRemaining).toBe(1);
       await expect(readSignup(signupsDir, 'stale-user')).resolves.toBeNull();
       await expect(readSignup(signupsDir, 'fresh-user')).resolves.toEqual(fresh);
+    });
+
+    // Pins the Number.isNaN(createdAtMs) guard: reverting to the old
+    // `now - Date.parse(record.createdAt) > ttlMs` check makes this fail,
+    // since `now - NaN` is NaN and `NaN > ttlMs` is always false, letting a
+    // corrupted record survive the sweep forever.
+    it('deletes an unverified record with an unparseable createdAt, rather than letting it survive forever', async () => {
+      const record = makeRecord({ createdAt: 'not-a-date' });
+      await createSignupExclusive(signupsDir, record);
+
+      const result = await sweepExpiredSignups(signupsDir, 1000);
+
+      expect(result.unverifiedRemaining).toBe(0);
+      await expect(readSignup(signupsDir, 'antonio')).resolves.toBeNull();
     });
 
     it('honors an explicit `now` for deterministic testing', async () => {

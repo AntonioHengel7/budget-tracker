@@ -185,7 +185,7 @@ export function verifyPassword(password: unknown, passwordHash: string): Promise
 // otherwise an unknown-username request returns in microseconds (object
 // lookup) instead of ~100ms (bcrypt compare), which is itself a timing
 // side-channel revealing valid usernames.
-const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-constant-time-compare', BCRYPT_COST);
+export const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-constant-time-compare', BCRYPT_COST);
 
 /**
  * Authenticates a username/password pair against a list of credentials.

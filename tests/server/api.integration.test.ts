@@ -699,6 +699,51 @@ describe('web API', () => {
       expect(stored.email).toBe('first@example.com');
     });
 
+    it('a resend with a DIFFERENT password than the original does not change the stored passwordHash -- the attacker cannot hijack a pending account by knowing only its username and email', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      const victimSignup = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'victim', email: 'victim@example.com', password: 'victimpassword' });
+      expect(victimSignup.status).toBe(200);
+      const original = JSON.parse(await readFile(join(dataDir, 'signups', 'victim.json'), 'utf-8'));
+      sendEmail.mockClear(); // so extractVerifyLink below picks up the resend's (latest) link, not the original
+
+      // Attacker knows victim's username + email (not secret) but not their
+      // password. Same email as the pending record => treated as a resend,
+      // not a new-collision case, but the STORED password must survive.
+      const attackerResend = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'victim', email: 'victim@example.com', password: 'attackerpassword' });
+      expect(attackerResend.status).toBe(200);
+      expect(attackerResend.body).toEqual({ message: 'check your email to verify your account' });
+
+      const stored = JSON.parse(await readFile(join(dataDir, 'signups', 'victim.json'), 'utf-8'));
+      expect(stored.passwordHash).toBe(original.passwordHash);
+      expect(stored.email).toBe('victim@example.com');
+      // The re-minted token is a fresh mint (a genuine resend re-mints the
+      // token), so it's expected to differ from the original -- only the
+      // password/email must be preserved.
+      expect(stored.verificationTokenHash).not.toBe(original.verificationTokenHash);
+
+      // The latest (attacker-triggered) verification link still goes to the
+      // victim's real inbox and, once clicked, the victim's ORIGINAL
+      // password -- not the attacker's -- must be the one that logs in.
+      const { username, token } = extractVerifyLink(sendEmail);
+      const verifyRes = await request(signupApp).post('/api/verify').send({ username, token });
+      expect(verifyRes.status).toBe(200);
+
+      const attackerLogin = await request(signupApp)
+        .post('/api/login')
+        .send({ username: 'victim', password: 'attackerpassword' });
+      expect(attackerLogin.status).toBe(401);
+
+      const victimLogin = await request(signupApp)
+        .post('/api/login')
+        .send({ username: 'victim', password: 'victimpassword' });
+      expect(victimLogin.status).toBe(200);
+      expect(victimLogin.body).toEqual({ username: 'victim' });
+    });
+
     it('rejects a signup for an existing unverified username with a DIFFERENT email with 409, sends no email, and leaves the original record untouched', async () => {
       const { signupApp, sendEmail } = createSignupApp({ unverifiedCap: 1 });
       const first = await request(signupApp)
@@ -756,6 +801,26 @@ describe('web API', () => {
       const secondClick = await request(signupApp).post('/api/verify').send({ username, token });
       expect(secondClick.status).toBe(200);
       expect(secondClick.body).toEqual({ message: 'already verified', username: 'newuser' });
+    });
+
+    it('rejects a WRONG/garbage token against an already-verified account with the generic 400, not the idempotent "already verified" 200 -- pins the record.verified check running AFTER the token compare', async () => {
+      const { signupApp, sendEmail } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+      const { username, token } = extractVerifyLink(sendEmail);
+      await request(signupApp).post('/api/verify').send({ username, token });
+
+      // If `record.verified` were checked before the token compare (the old,
+      // buggy ordering), ANY token against a verified username would return
+      // the 200 idempotent response -- an unauthenticated verified-username
+      // enumeration oracle. It must instead fall through to the same generic
+      // 400 every other invalid-token case gets.
+      const res = await request(signupApp)
+        .post('/api/verify')
+        .send({ username, token: 'garbage-token-not-the-real-one' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'invalid or expired verification link' });
     });
 
     it('rejects an expired verification token with 400', async () => {

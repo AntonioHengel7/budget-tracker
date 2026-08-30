@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StorageError } from '../storage/jsonStore.js';
-import { verifyPassword } from './credentials.js';
+import { DUMMY_HASH, verifyPassword } from './credentials.js';
 import { resolveSignupPath } from './paths.js';
 import type { SignupRecord } from './signupSchema.js';
 
@@ -287,6 +287,15 @@ export async function sweepExpiredSignups(
  * returns `'unverified'`; a wrong password returns `'invalid-password'`
  * regardless of verified status, indistinguishable from a wrong password
  * against a verified account.
+ *
+ * The `record === null` branch below still runs a real bcrypt compare
+ * against `DUMMY_HASH` before returning -- mirroring `authenticate` in
+ * `credentials.ts`, which uses the exact same constant for the exact same
+ * reason. Without it, a nonexistent username would return in microseconds
+ * (object lookup) while every real username paid the ~100ms bcrypt cost
+ * above, making the response time itself an unauthenticated
+ * username-existence oracle even though the status-code oracle this
+ * function's reordering was written to close is gone.
  */
 export async function checkSignupLogin(
   signupsDir: string,
@@ -295,6 +304,7 @@ export async function checkSignupLogin(
 ): Promise<'ok' | 'unverified' | 'not-found' | 'invalid-password'> {
   const record = await readSignup(signupsDir, username);
   if (record === null) {
+    await verifyPassword(password, DUMMY_HASH);
     return 'not-found';
   }
   const isValid = await verifyPassword(password, record.passwordHash);
