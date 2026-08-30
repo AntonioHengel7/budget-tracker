@@ -227,7 +227,7 @@ label {
   background: none;
   border: none;
   padding: 0;
-  color: var(--color-link, inherit);
+  color: var(--color-accent);
   text-decoration: underline;
   cursor: pointer;
   font: inherit;

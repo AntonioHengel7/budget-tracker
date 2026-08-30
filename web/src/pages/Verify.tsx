@@ -34,7 +34,7 @@ export function Verify({ onBackToLogin }: VerifyProps): React.JSX.Element {
       .then((body) => setState({ status: 'success', message: body.message }))
       .catch((err) => {
         const message =
-          err instanceof ApiError && typeof err.message === 'string' && err.message !== ''
+          err instanceof ApiError && err.message !== ''
             ? err.message
             : 'could not verify your account, try again';
         setState({ status: 'error', message });

@@ -33,7 +33,7 @@ export function Signup({ onSwitchToLogin }: SignupProps): React.JSX.Element {
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
         setError('too many signup attempts -- try again in a bit');
-      } else if (err instanceof ApiError && typeof err.message === 'string' && err.message !== '') {
+      } else if (err instanceof ApiError && err.message !== '') {
         // Signup errors (invalid username, weak password, username taken,
         // ...) are validation-shaped and safe to show verbatim, unlike
         // Login's deliberately generic "invalid username or password".

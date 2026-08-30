@@ -249,6 +249,18 @@ describe('signupStore', () => {
       await expect(checkSignupLogin(signupsDir, 'antonio', password)).resolves.toBe('ok');
     });
 
+    it('returns "invalid-password" (not "unverified") for an unverified account given the WRONG password -- no password knowledge must never disclose pending-account existence', async () => {
+      const record = makeRecord({
+        verified: false,
+        passwordHash: bcrypt.hashSync('correct horse battery staple', TEST_BCRYPT_COST),
+      });
+      await createSignupExclusive(signupsDir, record);
+
+      await expect(checkSignupLogin(signupsDir, 'antonio', 'totally wrong')).resolves.toBe(
+        'invalid-password',
+      );
+    });
+
     it('returns "invalid-password" for a verified account with the wrong password', async () => {
       const record = makeRecord({
         verified: true,

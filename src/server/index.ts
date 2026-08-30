@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import type { AppConfig } from './app.js';
 import { CredentialsConfigError, loadCredentials } from './credentials.js';
 import type { Credential } from './credentials.js';
 import { createResendSender } from './email.js';
@@ -112,7 +113,7 @@ export function boot(): Booted {
   // rather than booting into a half-configured signup feature that would
   // only reveal its brokenness on the first real signup attempt.
   const resendApiKey = readEnv('RESEND_API_KEY');
-  let signup: NonNullable<Parameters<typeof createApp>[0]['signup']> | undefined;
+  let signup: NonNullable<AppConfig['signup']> | undefined;
   if (resendApiKey !== undefined && resendApiKey !== '') {
     const emailFromAddress = readEnv('EMAIL_FROM_ADDRESS');
     if (emailFromAddress === undefined || emailFromAddress === '') {

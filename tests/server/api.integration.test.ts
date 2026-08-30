@@ -596,6 +596,15 @@ describe('web API', () => {
       expect(res.body).toEqual({ error: 'invalid credentials' });
     });
 
+    it('falls through to the generic 401 for a malformed username on /api/login when signup is enabled, instead of a 400 echoing the raw input', async () => {
+      const { signupApp } = createSignupApp();
+      const res = await request(signupApp)
+        .post('/api/login')
+        .send({ username: '../../etc/passwd', password: 'whatever' });
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'invalid credentials' });
+    });
+
     it('signup happy path: creates an unverified record and sends a verification email', async () => {
       const { signupApp, sendEmail } = createSignupApp();
       const res = await request(signupApp).post('/api/signup').send({
@@ -673,7 +682,7 @@ describe('web API', () => {
       expect(second.body).toEqual({ error: 'signups are temporarily unavailable, try again later' });
     });
 
-    it('a resend/retry for the same unverified username overwrites the record without counting against the cap', async () => {
+    it('a resend/retry for the same unverified username and same email overwrites the record without counting against the cap', async () => {
       const { signupApp, sendEmail } = createSignupApp({ unverifiedCap: 1 });
       const first = await request(signupApp)
         .post('/api/signup')
@@ -682,12 +691,38 @@ describe('web API', () => {
 
       const resend = await request(signupApp)
         .post('/api/signup')
-        .send({ username: 'newuser', email: 'second@example.com', password: 'longenoughpassword' });
+        .send({ username: 'newuser', email: 'first@example.com', password: 'longenoughpassword' });
       expect(resend.status).toBe(200);
       expect(sendEmail).toHaveBeenCalledTimes(2);
 
       const stored = JSON.parse(await readFile(join(dataDir, 'signups', 'newuser.json'), 'utf-8'));
-      expect(stored.email).toBe('second@example.com');
+      expect(stored.email).toBe('first@example.com');
+    });
+
+    it('rejects a signup for an existing unverified username with a DIFFERENT email with 409, sends no email, and leaves the original record untouched', async () => {
+      const { signupApp, sendEmail } = createSignupApp({ unverifiedCap: 1 });
+      const first = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'victim', email: 'victim@example.com', password: 'victimpassword' });
+      expect(first.status).toBe(200);
+      const original = JSON.parse(await readFile(join(dataDir, 'signups', 'victim.json'), 'utf-8'));
+      sendEmail.mockClear();
+
+      // An attacker who knows the victim's pending username, but not their
+      // email, must not be able to hijack the record by posting their own
+      // email -- this must return the same generic 409 every other
+      // collision case gets, not a distinct response (see #105).
+      const attack = await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'victim', email: 'attacker@evil.com', password: 'attackerpassword' });
+      expect(attack.status).toBe(409);
+      expect(attack.body).toEqual({ error: 'username already taken' });
+      expect(sendEmail).not.toHaveBeenCalled();
+
+      const stored = JSON.parse(await readFile(join(dataDir, 'signups', 'victim.json'), 'utf-8'));
+      expect(stored.email).toBe(original.email);
+      expect(stored.passwordHash).toBe(original.passwordHash);
+      expect(stored.verificationTokenHash).toBe(original.verificationTokenHash);
     });
 
     it('verify happy path: flips the record to verified and allows login afterward', async () => {
@@ -734,7 +769,7 @@ describe('web API', () => {
 
       const res = await request(signupApp).post('/api/verify').send({ username, token });
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: 'verification link expired, sign up again' });
+      expect(res.body).toEqual({ error: 'invalid or expired verification link' });
     });
 
     it('rejects a wrong verification token with 400', async () => {
@@ -767,6 +802,20 @@ describe('web API', () => {
         .send({ username: 'newuser', password: 'longenoughpassword' });
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: 'please verify your email before logging in' });
+      expect(res.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('login responds with the generic 401 (not the 403 unverified hint) for an unverified account given the WRONG password -- must not disclose pending-account existence without password knowledge', async () => {
+      const { signupApp } = createSignupApp();
+      await request(signupApp)
+        .post('/api/signup')
+        .send({ username: 'newuser', email: 'a@example.com', password: 'longenoughpassword' });
+
+      const res = await request(signupApp)
+        .post('/api/login')
+        .send({ username: 'newuser', password: 'totally wrong' });
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'invalid credentials' });
       expect(res.headers['set-cookie']).toBeUndefined();
     });
 

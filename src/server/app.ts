@@ -267,6 +267,17 @@ function queryString(query: Request['query'], key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/**
+ * Reads `body[key]` as-is (`unknown`), or `undefined` if the body itself
+ * isn't a plain object. Unlike `stringField`/`booleanField` above, this
+ * doesn't narrow the value's type -- used for fields like a raw password
+ * that must reach a downstream check (e.g. `typeof password !== 'string'`)
+ * rather than being silently coerced to `undefined` here.
+ */
+function rawField(body: unknown, key: string): unknown {
+  return typeof body === 'object' && body !== null ? (body as Record<string, unknown>)[key] : undefined;
+}
+
 function buildListOptions(query: Request['query']): ListOptions {
   const from = queryString(query, 'from');
   const to = queryString(query, 'to');
@@ -551,10 +562,7 @@ export function createApp(config: AppConfig): Express {
 
   app.post('/api/login', loginLimiter, async (req: Request, res: Response) => {
     const username = stringField(req.body, 'username');
-    const password: unknown =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)['password']
-        : undefined;
+    const password: unknown = rawField(req.body, 'password');
 
     if (username === undefined) {
       res.status(401).json({ error: 'invalid credentials' });
@@ -573,7 +581,19 @@ export function createApp(config: AppConfig): Express {
     // all. When config.signup is undefined this branch never executes, so
     // behavior is byte-for-byte identical to a build with no signup code.
     if (config.signup) {
-      const signupResult = await checkSignupLogin(signupsDir, username, password);
+      let signupResult: Awaited<ReturnType<typeof checkSignupLogin>> | undefined;
+      try {
+        signupResult = await checkSignupLogin(signupsDir, username, password);
+      } catch (err) {
+        if (!(err instanceof InvalidUsernameError)) {
+          throw err;
+        }
+        // A malformed username (e.g. path-traversal-shaped characters) fails
+        // assertValidUsername inside readSignup -- fall through to the
+        // generic 401 below instead of letting it propagate to the generic
+        // DomainError->400 branch, which would otherwise echo the raw
+        // username back in the response body.
+      }
       if (signupResult === 'ok') {
         issueSession(res, config, username);
         return;
@@ -582,8 +602,9 @@ export function createApp(config: AppConfig): Express {
         res.status(403).json({ error: 'please verify your email before logging in' });
         return;
       }
-      // 'not-found' or 'invalid-password' -- fall through to the generic
-      // 401 below, unchanged from today's behavior.
+      // 'not-found', 'invalid-password', or the InvalidUsernameError case
+      // above -- fall through to the generic 401 below, unchanged from
+      // today's behavior.
     }
 
     res.status(401).json({ error: 'invalid credentials' });
@@ -683,10 +704,7 @@ export function createApp(config: AppConfig): Express {
 
       const username = stringField(req.body, 'username');
       const email = stringField(req.body, 'email');
-      const password: unknown =
-        typeof req.body === 'object' && req.body !== null
-          ? (req.body as Record<string, unknown>)['password']
-          : undefined;
+      const password: unknown = rawField(req.body, 'password');
 
       if (username === undefined || email === undefined || typeof password !== 'string') {
         res.status(400).json({ error: 'username, email, and password are required' });
@@ -751,19 +769,39 @@ export function createApp(config: AppConfig): Express {
         return;
       }
 
+      // Computed up front (rather than after bcrypt.hash, where it used to
+      // live) so the resend/ownership check just below can compare against
+      // it before any record is touched.
+      const normalizedEmail = email.toLowerCase();
+
       const existingSignup = await findSignupByUsernameCaseFold(signupsDir, username);
       let isResend = false;
       if (existingSignup !== null) {
-        if (existingSignup.username !== username || existingSignup.verified) {
-          // Either a case-fold collision against a differently-cased
-          // username (no case-insensitive duplicates allowed, mirroring
-          // credentials.ts), or an exact-case match that's already verified.
+        if (
+          existingSignup.username !== username ||
+          existingSignup.verified ||
+          existingSignup.email !== normalizedEmail
+        ) {
+          // Every collision case gets the exact same response: a case-fold
+          // collision against a differently-cased username (no
+          // case-insensitive duplicates allowed, mirroring credentials.ts),
+          // an exact-case match that's already verified, or an exact-case
+          // *unverified* match whose email doesn't match the requester's.
+          // The email-mismatch arm is the load-bearing one -- without it, an
+          // attacker who merely knows a victim's pending username (no
+          // password or email knowledge needed) could POST their own email
+          // here and have it treated as a "resend", silently overwriting the
+          // victim's pending email/password/token (account takeover). It
+          // must stay indistinguishable from the other collision cases
+          // rather than getting its own response, or the response itself
+          // becomes a new enumeration signal.
           res.status(409).json({ error: 'username already taken' });
           return;
         }
-        // Exact-case match, still unverified: this is a resend/retry, not a
-        // new signup -- it doesn't increase the unverified total, so it
-        // must not be checked against (or counted toward) the cap below.
+        // Exact-case match, still unverified, same email as before: a
+        // genuine resend/retry by the record's own owner, not a new signup
+        // -- it doesn't increase the unverified total, so it must not be
+        // checked against (or counted toward) the cap below.
         isResend = true;
       } else {
         const cap = signupConfig.unverifiedCap ?? DEFAULT_UNVERIFIED_SIGNUP_CAP;
@@ -780,7 +818,6 @@ export function createApp(config: AppConfig): Express {
       // pays the same bcrypt cost regardless of whether the email turns out
       // to be a duplicate.
       const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-      const normalizedEmail = email.trim().toLowerCase();
       const emailOwner = await findSignupByEmail(signupsDir, normalizedEmail);
       // A DIFFERENT username already owns this email -- a resend under the
       // same username with the same email is not a duplicate of itself.
@@ -855,24 +892,17 @@ export function createApp(config: AppConfig): Express {
       return;
     }
 
-    if (record.verified) {
-      // Idempotent: a second click on an old (already-used) link is not an
-      // error.
-      res.status(200).json({ message: 'already verified', username });
-      return;
-    }
-
-    if (
-      record.verificationTokenExpiresAt === null ||
-      Date.now() > Date.parse(record.verificationTokenExpiresAt)
-    ) {
-      res.status(400).json({ error: 'verification link expired, sign up again' });
-      return;
-    }
-
     // Timing-safe comparison, mirroring session.ts's verifySession pattern
     // exactly -- including the length check before timingSafeEqual, which
-    // throws on mismatched-length buffers rather than returning false.
+    // throws on mismatched-length buffers rather than returning false. This
+    // runs *before* the `record.verified` idempotency check below: an
+    // already-verified record must reject a non-matching token with the same
+    // generic 400 a nonexistent record gets, rather than the 200 "already
+    // verified" it would get if `verified` were checked first -- otherwise
+    // any garbage token against a verified username is an unauthenticated
+    // verified-username enumeration oracle. Legitimate idempotency (a second
+    // click of the *same* emailed link) still works because verifying no
+    // longer nulls out verificationTokenHash below.
     const providedTokenHash = createHash('sha256').update(token).digest('hex');
     const providedBuf = Buffer.from(providedTokenHash, 'hex');
     const expectedBuf = Buffer.from(record.verificationTokenHash ?? '', 'hex');
@@ -884,12 +914,27 @@ export function createApp(config: AppConfig): Express {
       return;
     }
 
+    if (record.verified) {
+      // Idempotent: a second click on an old (already-used) link, with the
+      // same original token, is not an error.
+      res.status(200).json({ message: 'already verified', username });
+      return;
+    }
+
+    if (
+      record.verificationTokenExpiresAt === null ||
+      Date.now() > Date.parse(record.verificationTokenExpiresAt)
+    ) {
+      // Same generic message as every other invalid-token case above --
+      // existing-but-expired and never-existing must stay indistinguishable.
+      res.status(400).json({ error: 'invalid or expired verification link' });
+      return;
+    }
+
     await overwriteSignup(signupsDir, {
       ...record,
       verified: true,
       verifiedAt: new Date().toISOString(),
-      verificationTokenHash: null,
-      verificationTokenExpiresAt: null,
     });
 
     res.status(200).json({ message: 'verified', username });

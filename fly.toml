@@ -15,8 +15,16 @@ primary_region = "lax"
   # itself is unambiguous about the trust-proxy topology it assumes.
   TRUST_PROXY = "1"
 
-# SESSION_SECRET and AUTH_USERS_JSON are secrets -- never set them here.
-# Configure them with `fly secrets set SESSION_SECRET=... AUTH_USERS_JSON=...`.
+# SESSION_SECRET, AUTH_USERS_JSON, and RESEND_API_KEY are secrets -- never
+# set them here. Configure them with:
+#   fly secrets set SESSION_SECRET=... AUTH_USERS_JSON=... RESEND_API_KEY=...
+#
+# RESEND_API_KEY, EMAIL_FROM_ADDRESS, and PUBLIC_APP_URL together gate
+# self-service signup (#104) -- unset/empty RESEND_API_KEY leaves the
+# feature fully disabled (see index.ts's boot()). EMAIL_FROM_ADDRESS and
+# PUBLIC_APP_URL aren't secret-shaped, so they can go in [env] above instead
+# of `fly secrets set` -- deployer's choice -- but once RESEND_API_KEY is
+# set, both become required or the app fails to boot.
 
 [[mounts]]
   source = "budget_data"

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { link, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StorageError } from '../storage/jsonStore.js';
 import { verifyPassword } from './credentials.js';
@@ -117,23 +117,40 @@ export async function createSignupExclusive(
 
 /**
  * Overwrites (or creates) the signup record at `<signupsDir>/<record.username>.json`
- * directly -- no exclusivity guarantee, unlike `createSignupExclusive`. Used
- * for the two cases where clobbering the existing record on disk is exactly
- * the intent: flipping `verified` from false to true on a successful
+ * -- no exclusivity guarantee, unlike `createSignupExclusive`. Used for the
+ * two cases where clobbering the existing record on disk is exactly the
+ * intent: flipping `verified` from false to true on a successful
  * verification, and the same-username resend/retry path in `POST
  * /api/signup` (a caller who already owns this unverified username is
  * allowed to overwrite their own pending record with a fresh token).
+ *
+ * Written via a temp-file-then-`rename()` pattern, same overall shape as
+ * `createSignupExclusive` above but deliberately using `rename()` instead of
+ * `link()`: this function's whole purpose is to clobber whatever is already
+ * at the final path, which is exactly what `rename()` does (and what
+ * `link()`'s `EEXIST` would prevent). This avoids a truncated/partial record
+ * on disk if the process crashes or hits ENOSPC mid-write, which a direct
+ * `writeFile` onto the final path would not.
  */
 export async function overwriteSignup(signupsDir: string, record: SignupRecord): Promise<void> {
   await mkdir(signupsDir, { recursive: true, mode: 0o700 });
-  const filePath = resolveSignupPath(signupsDir, record.username);
+  const finalPath = resolveSignupPath(signupsDir, record.username);
+  const tempPath = join(signupsDir, `.${record.username}.${randomUUID()}.tmp`);
+  const json = JSON.stringify(record, null, 2);
+
   try {
-    await writeFile(filePath, JSON.stringify(record, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    await writeFile(tempPath, json, { encoding: 'utf-8', mode: 0o600 });
+    await rename(tempPath, finalPath);
   } catch (err) {
     throw new StorageError(
       `failed to save signup record for "${record.username}": ${(err as Error).message}`,
       { cause: err },
     );
+  } finally {
+    // No-op once rename() has already moved the temp file away -- `force`
+    // makes the ENOENT case silent, mirroring createSignupExclusive's own
+    // cleanup finally.
+    await rm(tempPath, { force: true }).catch(() => {});
   }
 }
 
@@ -226,7 +243,14 @@ export async function sweepExpiredSignups(
         if (record.verified) {
           continue; // verified accounts never expire
         }
-        if (now - Date.parse(record.createdAt) > ttlMs) {
+        // An unparseable createdAt (a corrupted record) must count as
+        // already-expired -- Date.parse returning NaN would otherwise make
+        // `now - NaN > ttlMs` false forever, letting a corrupted record
+        // permanently occupy a slot under the unverified-account cap with no
+        // way to self-heal.
+        const createdAtMs = Date.parse(record.createdAt);
+        const isExpired = Number.isNaN(createdAtMs) || now - createdAtMs > ttlMs;
+        if (isExpired) {
           await rm(filePath, { force: true });
         } else {
           unverifiedRemaining += 1;
@@ -253,10 +277,16 @@ export async function sweepExpiredSignups(
  * not `findSignupByUsernameCaseFold` -- since this is a login check against a
  * single already-known account shape, not a duplicate/collision scan.
  *
- * `verified === false` is checked and returned *before* the password
- * compare: an unverified account has no valid login regardless of whether
- * the password is correct, and checking this first also avoids a needless
- * bcrypt compare on every unverified-account login attempt.
+ * The password compare runs *before* `verified` is consulted -- deliberately
+ * the opposite of what may look fastest. If `verified === false`
+ * short-circuited before the password compare, `POST /api/login` with *any*
+ * password (no password knowledge required) would distinguish a pending
+ * unverified username (403) from a nonexistent one (401), making
+ * `/api/login` an unauthenticated account-existence oracle for every pending
+ * signup -- see #105. Only a *correct* password on an unverified account
+ * returns `'unverified'`; a wrong password returns `'invalid-password'`
+ * regardless of verified status, indistinguishable from a wrong password
+ * against a verified account.
  */
 export async function checkSignupLogin(
   signupsDir: string,
@@ -267,9 +297,9 @@ export async function checkSignupLogin(
   if (record === null) {
     return 'not-found';
   }
-  if (!record.verified) {
-    return 'unverified';
-  }
   const isValid = await verifyPassword(password, record.passwordHash);
-  return isValid ? 'ok' : 'invalid-password';
+  if (!isValid) {
+    return 'invalid-password';
+  }
+  return record.verified ? 'ok' : 'unverified';
 }
