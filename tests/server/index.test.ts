@@ -160,4 +160,63 @@ describe('boot', () => {
       await rm(tmpCwd, { recursive: true, force: true });
     }
   });
+
+  // #104: self-service signup is gated on RESEND_API_KEY's presence.
+  describe('self-service signup env var validation', () => {
+    it('boots with signup disabled when RESEND_API_KEY is unset', () => {
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('RESEND_API_KEY', undefined);
+
+      const { app } = boot();
+      expect(app).toBeDefined();
+    });
+
+    it('throws a clear error when RESEND_API_KEY is set but EMAIL_FROM_ADDRESS is missing', () => {
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('RESEND_API_KEY', 're_test_key');
+      vi.stubEnv('EMAIL_FROM_ADDRESS', undefined);
+      vi.stubEnv('PUBLIC_APP_URL', 'https://budget.example.com');
+
+      expect(() => boot()).toThrow(/EMAIL_FROM_ADDRESS is not set/);
+    });
+
+    it('throws a clear error when RESEND_API_KEY is set but PUBLIC_APP_URL is missing', () => {
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('RESEND_API_KEY', 're_test_key');
+      vi.stubEnv('EMAIL_FROM_ADDRESS', 'noreply@example.com');
+      vi.stubEnv('PUBLIC_APP_URL', undefined);
+
+      expect(() => boot()).toThrow(/PUBLIC_APP_URL is not set/);
+    });
+
+    it('treats an empty RESEND_API_KEY the same as unset, not requiring the other two vars', () => {
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('RESEND_API_KEY', '');
+      vi.stubEnv('EMAIL_FROM_ADDRESS', undefined);
+      vi.stubEnv('PUBLIC_APP_URL', undefined);
+
+      expect(() => boot()).not.toThrow();
+    });
+
+    it('boots successfully and wires signup through when all three env vars are set', async () => {
+      vi.stubEnv('SESSION_SECRET', VALID_SECRET);
+      vi.stubEnv('AUTH_USERS_JSON', VALID_AUTH_USERS_JSON);
+      vi.stubEnv('RESEND_API_KEY', 're_test_key');
+      vi.stubEnv('EMAIL_FROM_ADDRESS', 'noreply@example.com');
+      vi.stubEnv('PUBLIC_APP_URL', 'https://budget.example.com');
+      vi.stubEnv('INSECURE_COOKIES', 'true');
+
+      const { app } = boot();
+      // Proves the feature is actually wired through to the app, not just
+      // that boot() didn't throw: with signup disabled /api/signup always
+      // 503s (see app.test.ts), so a non-503 here (400, for an empty body)
+      // demonstrates config.signup made it into createApp.
+      const res = await request(app).post('/api/signup').send({});
+      expect(res.status).not.toBe(503);
+    });
+  });
 });

@@ -155,6 +155,14 @@ export function startDemo(): Promise<{ username: string }> {
   return request('/api/demo', { method: 'POST' });
 }
 
+export function signup(username: string, email: string, password: string): Promise<{ message: string }> {
+  return request('/api/signup', { method: 'POST', body: JSON.stringify({ username, email, password }) });
+}
+
+export function verify(username: string, token: string): Promise<{ message: string; username?: string }> {
+  return request('/api/verify', { method: 'POST', body: JSON.stringify({ username, token }) });
+}
+
 export function me(): Promise<{ username: string }> {
   return request('/api/me');
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import type { AppConfig } from './app.js';
 import { CredentialsConfigError, loadCredentials } from './credentials.js';
 import type { Credential } from './credentials.js';
+import { createResendSender } from './email.js';
 
 const DEFAULT_PORT = 8080;
 const DEFAULT_DATA_DIR = 'data';
@@ -102,6 +104,32 @@ export function boot(): Booted {
   const rawStaticDir = readEnv('STATIC_DIR');
   const staticDir = rawStaticDir === '' ? undefined : rawStaticDir;
 
+  // Self-service signup (#104) is entirely opt-in, gated on RESEND_API_KEY's
+  // presence: an empty/unset value leaves `signup` undefined below, so a
+  // deployment that hasn't configured any of the three new env vars is
+  // completely unaffected (see AppConfig.signup's doc comment in app.ts).
+  // Once RESEND_API_KEY is set, EMAIL_FROM_ADDRESS and PUBLIC_APP_URL become
+  // required -- failing fast at boot (same style as SESSION_SECRET above)
+  // rather than booting into a half-configured signup feature that would
+  // only reveal its brokenness on the first real signup attempt.
+  const resendApiKey = readEnv('RESEND_API_KEY');
+  let signup: NonNullable<AppConfig['signup']> | undefined;
+  if (resendApiKey !== undefined && resendApiKey !== '') {
+    const emailFromAddress = readEnv('EMAIL_FROM_ADDRESS');
+    if (emailFromAddress === undefined || emailFromAddress === '') {
+      throw new Error('EMAIL_FROM_ADDRESS is not set (required when RESEND_API_KEY is set)');
+    }
+    const publicAppUrl = readEnv('PUBLIC_APP_URL');
+    if (publicAppUrl === undefined || publicAppUrl === '') {
+      throw new Error('PUBLIC_APP_URL is not set (required when RESEND_API_KEY is set)');
+    }
+    signup = {
+      fromAddress: emailFromAddress,
+      publicAppUrl,
+      sendEmail: createResendSender(resendApiKey, emailFromAddress),
+    };
+  }
+
   const app = createApp({
     dataDir,
     credentials,
@@ -109,6 +137,7 @@ export function boot(): Booted {
     trustProxy,
     insecureCookies,
     ...(staticDir !== undefined ? { staticDir } : {}),
+    ...(signup !== undefined ? { signup } : {}),
   });
 
   return { app, port };

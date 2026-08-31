@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import express from 'express';
@@ -6,6 +6,7 @@ import type { Express, NextFunction, Request, RequestHandler, Response } from 'e
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
+import bcrypt from 'bcryptjs';
 import { addTransaction } from '../cli/commands/add.js';
 import type { AddOptions } from '../cli/commands/add.js';
 import { removeTransaction } from '../cli/commands/rm.js';
@@ -18,10 +19,22 @@ import { getSummary } from '../cli/commands/summary.js';
 import { todayIsoDate, currentPeriod } from '../shared/clock.js';
 import { DomainError } from '../domain/errors.js';
 import { StorageError } from '../storage/jsonStore.js';
-import { authenticate } from './credentials.js';
+import { authenticate, BCRYPT_COST } from './credentials.js';
 import type { Credential } from './credentials.js';
-import { resolveUserStorePath } from './paths.js';
+import type { SendEmail } from './email.js';
+import { assertValidUsername, InvalidUsernameError, resolveUserStorePath } from './paths.js';
 import { signSession } from './session.js';
+import {
+  checkSignupLogin,
+  createSignupExclusive,
+  findSignupByEmail,
+  findSignupByUsernameCaseFold,
+  overwriteSignup,
+  readSignup,
+  sweepExpiredSignups,
+} from './signupStore.js';
+import { SIGNUP_SCHEMA_VERSION } from './signupSchema.js';
+import type { SignupRecord } from './signupSchema.js';
 import { createAuthMiddleware, isAuthenticatedRequest } from './authMiddleware.js';
 import type { AuthenticatedRequest } from './authMiddleware.js';
 
@@ -80,6 +93,30 @@ export interface AppConfig {
    * that forgets to configure anything still ships a secure cookie.
    */
   readonly insecureCookies?: boolean;
+  /**
+   * Enables self-service signup with email verification. `undefined` (the
+   * default) means the feature is fully disabled: `POST /api/signup` and
+   * `POST /api/verify` both respond `503`, and `POST /api/login` behaves
+   * byte-for-byte identically to a build with no signup code at all (no new
+   * code path executes -- see `checkSignupLogin`'s call site below, gated on
+   * this field). This is deliberately additive/opt-in so an existing
+   * deployment that hasn't configured the new env vars (see `index.ts`) is
+   * completely unaffected.
+   */
+  readonly signup?: {
+    /** The `from` address every verification email is sent as. */
+    readonly fromAddress: string;
+    /** Base URL (no trailing slash) the verification link is built against, e.g. `https://budget.example.com`. */
+    readonly publicAppUrl: string;
+    /** Injected so tests (and any future email provider swap) never need a real Resend call. */
+    readonly sendEmail: SendEmail;
+    /** Overrides the default `/api/signup` rate limit -- mainly so tests don't need to wait out a real 1-hour window. */
+    readonly rateLimit?: RateLimitConfig;
+    /** Overrides how long an unverified signup's token is valid before the sweep deletes it -- mainly so tests don't need to wait out a real 48-hour TTL. */
+    readonly tokenTtlMs?: number;
+    /** Overrides the default cap on total unverified signup accounts -- mainly so tests don't need to create hundreds to exercise the cap. */
+    readonly unverifiedCap?: number;
+  };
 }
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -134,6 +171,51 @@ const DEFAULT_DEMO_ACCOUNT_CAP = 200;
 /** Max attempts to generate a demo username before giving up (see `/api/demo` below). */
 const MAX_DEMO_USERNAME_ATTEMPTS = 5;
 
+/**
+ * Self-service signup shares the demo-account system's anti-spam shape (rate
+ * limit + volume cap + TTL sweep) for the same underlying reason -- see
+ * `DEFAULT_DEMO_RATE_LIMIT`'s doc comment: every signup writes a new record
+ * file to disk before it's ever verified, so this is a resource-exhaustion
+ * guard first. It's tighter than the demo limit (5/hour) because a genuine
+ * human only ever needs to sign up once, plus maybe resend a lost
+ * verification email once or twice -- 3/hour/IP comfortably covers that
+ * without a real user noticing, while still meaningfully throttling a
+ * scripted signup-spam attempt.
+ */
+const DEFAULT_SIGNUP_RATE_LIMIT: RateLimitConfig = {
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+};
+/**
+ * Hard cap on how many *unverified* signup accounts may exist at once,
+ * checked after each sweep -- the same role `DEFAULT_DEMO_ACCOUNT_CAP` plays
+ * for demo accounts, but scoped to unverified signups specifically: a
+ * verified account never counts against this and never expires (see
+ * `sweepExpiredSignups`). 100 is comfortably above any realistic organic
+ * signup burst while bounding worst-case unverified-account disk usage to a
+ * hundred small record files.
+ */
+const DEFAULT_UNVERIFIED_SIGNUP_CAP = 100;
+/**
+ * How long an unverified signup's verification token remains valid before
+ * the sweep in `POST /api/signup` deletes the whole record. 48 hours is
+ * generous enough that someone who doesn't check email right away (signs up
+ * Friday evening, checks Monday) still finds a working link, while still
+ * bounding how long an abandoned or spam signup lingers on disk before
+ * self-cleaning.
+ */
+const DEFAULT_SIGNUP_TOKEN_TTL_MS = 48 * 60 * 60 * 1000;
+/** RFC-5322-lite email shape check -- deliberately loose (this is a UX sanity check, not a deliverability guarantee; actual deliverability is proven by the click-through, not by regex). */
+const SIGNUP_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * Minimum signup password length. 8 is the well-established floor for a
+ * user-chosen password providing meaningful resistance to online guessing --
+ * this app has no separate complexity rule (mixed case/digits/symbols)
+ * beyond length, matching the "length over complexity rules" guidance most
+ * current password-strength advice converges on.
+ */
+const MIN_SIGNUP_PASSWORD_LENGTH = 8;
+
 function sessionCookieOptions(config: AppConfig): {
   httpOnly: true;
   sameSite: 'lax';
@@ -146,6 +228,19 @@ function sessionCookieOptions(config: AppConfig): {
     secure: !config.insecureCookies,
     path: '/',
   };
+}
+
+/**
+ * Signs a session token for `username` and sets it as the session cookie,
+ * then responds `200 { username }` -- the one success path shared by
+ * `/api/login` (both its `authenticate` branch and, once signup is enabled,
+ * its `checkSignupLogin` branch converge here) and `/api/demo`, so a session
+ * is only ever issued in exactly one place.
+ */
+function issueSession(res: Response, config: AppConfig, username: string): void {
+  const token = signSession(username, config.sessionSecret);
+  res.cookie('session', token, { ...sessionCookieOptions(config), maxAge: THIRTY_DAYS_MS });
+  res.status(200).json({ username });
 }
 
 /** Reads `body[key]` as a string, or `undefined` if absent/not a string. */
@@ -170,6 +265,17 @@ function booleanField(body: unknown, key: string): boolean | undefined {
 function queryString(query: Request['query'], key: string): string | undefined {
   const value = query[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Reads `body[key]` as-is (`unknown`), or `undefined` if the body itself
+ * isn't a plain object. Unlike `stringField`/`booleanField` above, this
+ * doesn't narrow the value's type -- used for fields like a raw password
+ * that must reach a downstream check (e.g. `typeof password !== 'string'`)
+ * rather than being silently coerced to `undefined` here.
+ */
+function rawField(body: unknown, key: string): unknown {
+  return typeof body === 'object' && body !== null ? (body as Record<string, unknown>)[key] : undefined;
 }
 
 function buildListOptions(query: Request['query']): ListOptions {
@@ -436,6 +542,12 @@ export function createApp(config: AppConfig): Express {
   app.use(express.json());
   app.use(cookieParser());
 
+  // Computed once and shared by every signup-related route below (and by
+  // /api/login's checkSignupLogin fallback) -- signup records live in their
+  // own subdirectory, never mixed in with per-user budget store files at
+  // the top of dataDir.
+  const signupsDir = join(config.dataDir, 'signups');
+
   // Stacked on top of generalLimiter above: login attempts are much more
   // sensitive (credential-stuffing risk) than ordinary API traffic, so this
   // stays tighter and keeps /api/login at least as restrictive as before
@@ -450,10 +562,7 @@ export function createApp(config: AppConfig): Express {
 
   app.post('/api/login', loginLimiter, async (req: Request, res: Response) => {
     const username = stringField(req.body, 'username');
-    const password: unknown =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)['password']
-        : undefined;
+    const password: unknown = rawField(req.body, 'password');
 
     if (username === undefined) {
       res.status(401).json({ error: 'invalid credentials' });
@@ -461,14 +570,44 @@ export function createApp(config: AppConfig): Express {
     }
 
     const ok = await authenticate(config.credentials, username, password);
-    if (!ok) {
-      res.status(401).json({ error: 'invalid credentials' });
+    if (ok) {
+      issueSession(res, config, username);
       return;
     }
 
-    const token = signSession(username, config.sessionSecret);
-    res.cookie('session', token, { ...sessionCookieOptions(config), maxAge: THIRTY_DAYS_MS });
-    res.status(200).json({ username });
+    // Self-service signup accounts live in a separate store from the static
+    // AUTH_USERS_JSON credentials `authenticate` just checked -- tried only
+    // once that has already failed, and only when the feature is enabled at
+    // all. When config.signup is undefined this branch never executes, so
+    // behavior is byte-for-byte identical to a build with no signup code.
+    if (config.signup) {
+      let signupResult: Awaited<ReturnType<typeof checkSignupLogin>> | undefined;
+      try {
+        signupResult = await checkSignupLogin(signupsDir, username, password);
+      } catch (err) {
+        if (!(err instanceof InvalidUsernameError)) {
+          throw err;
+        }
+        // A malformed username (e.g. path-traversal-shaped characters) fails
+        // assertValidUsername inside readSignup -- fall through to the
+        // generic 401 below instead of letting it propagate to the generic
+        // DomainError->400 branch, which would otherwise echo the raw
+        // username back in the response body.
+      }
+      if (signupResult === 'ok') {
+        issueSession(res, config, username);
+        return;
+      }
+      if (signupResult === 'unverified') {
+        res.status(403).json({ error: 'please verify your email before logging in' });
+        return;
+      }
+      // 'not-found', 'invalid-password', or the InvalidUsernameError case
+      // above -- fall through to the generic 401 below, unchanged from
+      // today's behavior.
+    }
+
+    res.status(401).json({ error: 'invalid credentials' });
   });
 
   app.post('/api/logout', (_req: Request, res: Response) => {
@@ -516,6 +655,322 @@ export function createApp(config: AppConfig): Express {
     const token = signSession(username, config.sessionSecret);
     res.cookie('session', token, { ...sessionCookieOptions(config), maxAge: THIRTY_DAYS_MS });
     res.status(200).json({ username });
+  });
+
+  // Constructed (and used) only when self-service signup is enabled -- see
+  // AppConfig.signup's doc comment. When undefined, /api/signup's handler
+  // below never invokes any rate limiter at all (beyond generalLimiter,
+  // which every /api/* route already sits behind); there is nothing to
+  // needlessly rate-limit on a disabled feature.
+  const signupLimiter = config.signup
+    ? rateLimit({
+        windowMs: config.signup.rateLimit?.windowMs ?? DEFAULT_SIGNUP_RATE_LIMIT.windowMs,
+        limit: config.signup.rateLimit?.max ?? DEFAULT_SIGNUP_RATE_LIMIT.max,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: { error: 'too many signup attempts, try again later' },
+      })
+    : undefined;
+
+  app.post(
+    '/api/signup',
+    // signupLimiter only exists when config.signup is set (see above) --
+    // this thin wrapper is what makes it conditionally applied without
+    // registering two separate routes for the enabled/disabled cases.
+    (req: Request, res: Response, next: NextFunction) => {
+      if (signupLimiter) {
+        signupLimiter(req, res, next);
+      } else {
+        next();
+      }
+    },
+    // No try/catch here, matching /api/login and /api/demo above: Express 5
+    // forwards a rejected promise from an async handler to the error
+    // middleware at the bottom of this file automatically -- e.g.
+    // config.signup.sendEmail throwing is deliberately left to propagate
+    // there rather than being caught locally (see the doc comment further
+    // down), landing on the generic 500 branch since a plain Error doesn't
+    // match any of the more specific instanceof checks.
+    async (req: Request, res: Response) => {
+      // Captured into a local so TypeScript narrows it to non-undefined for
+      // the rest of this handler, rather than relying on control-flow
+      // narrowing through `config.signup` (a property access) staying valid
+      // across every intervening `await`.
+      const signupConfig = config.signup;
+      if (signupConfig === undefined) {
+        res.status(503).json({ error: 'self-service signup is not enabled' });
+        return;
+      }
+
+      const username = stringField(req.body, 'username');
+      const email = stringField(req.body, 'email');
+      const password: unknown = rawField(req.body, 'password');
+
+      if (username === undefined || email === undefined || typeof password !== 'string') {
+        res.status(400).json({ error: 'username, email, and password are required' });
+        return;
+      }
+
+      try {
+        assertValidUsername(username);
+      } catch (err) {
+        if (err instanceof InvalidUsernameError) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        throw err;
+      }
+
+      if (!SIGNUP_EMAIL_PATTERN.test(email)) {
+        res.status(400).json({ error: 'a valid email address is required' });
+        return;
+      }
+
+      if (password.length < MIN_SIGNUP_PASSWORD_LENGTH) {
+        res.status(400).json({
+          error: `password must be at least ${MIN_SIGNUP_PASSWORD_LENGTH} characters`,
+        });
+        return;
+      }
+
+      // Mirrors /api/demo's sweep-before-check ordering: self-clean expired
+      // unverified signups before deciding whether the unverified-account
+      // cap (checked further below) has room for a new one.
+      const { unverifiedRemaining } = await sweepExpiredSignups(
+        signupsDir,
+        signupConfig.tokenTtlMs ?? DEFAULT_SIGNUP_TOKEN_TTL_MS,
+      );
+
+      // Same reserved-namespace rule credentials.ts already applies to
+      // AUTH_USERS_JSON entries -- see loadCredentials's doc comment.
+      if (username.startsWith('demo-')) {
+        res.status(400).json({ error: 'username is reserved' });
+        return;
+      }
+
+      const foldedUsername = username.toLowerCase();
+      const collidesWithConfiguredCredential = config.credentials.some(
+        (credential) => credential.username.toLowerCase() === foldedUsername,
+      );
+      if (collidesWithConfiguredCredential) {
+        res.status(409).json({ error: 'username already taken' });
+        return;
+      }
+
+      // A stale/orphaned budget data file for this username must never be
+      // silently taken over -- without this check, a signup could claim a
+      // pre-existing budget store the moment it first writes a transaction.
+      const budgetStoreAlreadyExists = await stat(resolveUserStorePath(config.dataDir, username)).then(
+        () => true,
+        () => false,
+      );
+      if (budgetStoreAlreadyExists) {
+        res.status(409).json({ error: 'username already taken' });
+        return;
+      }
+
+      // Computed up front (rather than after bcrypt.hash, where it used to
+      // live) so the resend/ownership check just below can compare against
+      // it before any record is touched.
+      const normalizedEmail = email.toLowerCase();
+
+      const existingSignup = await findSignupByUsernameCaseFold(signupsDir, username);
+      let isResend = false;
+      if (existingSignup !== null) {
+        if (
+          existingSignup.username !== username ||
+          existingSignup.verified ||
+          existingSignup.email !== normalizedEmail
+        ) {
+          // Every collision case gets the exact same response: a case-fold
+          // collision against a differently-cased username (no
+          // case-insensitive duplicates allowed, mirroring credentials.ts),
+          // an exact-case match that's already verified, or an exact-case
+          // *unverified* match whose email doesn't match the requester's.
+          // The email-mismatch arm is the load-bearing one -- without it, an
+          // attacker who merely knows a victim's pending username (no
+          // password or email knowledge needed) could POST their own email
+          // here and have it treated as a "resend", silently overwriting the
+          // victim's pending email/password/token (account takeover). It
+          // must stay indistinguishable from the other collision cases
+          // rather than getting its own response, or the response itself
+          // becomes a new enumeration signal.
+          res.status(409).json({ error: 'username already taken' });
+          return;
+        }
+        // Exact-case match, still unverified, same email as before: a
+        // genuine resend/retry by the record's own owner, not a new signup
+        // -- it doesn't increase the unverified total, so it must not be
+        // checked against (or counted toward) the cap below.
+        isResend = true;
+      } else {
+        const cap = signupConfig.unverifiedCap ?? DEFAULT_UNVERIFIED_SIGNUP_CAP;
+        if (unverifiedRemaining >= cap) {
+          res.status(503).json({
+            error: 'signups are temporarily unavailable, try again later',
+          });
+          return;
+        }
+      }
+
+      // Hashed unconditionally on every request -- including the resend path,
+      // which never uses this value (see isResend branch below) -- and the
+      // anti-enumeration duplicate-email path below that discards it, so
+      // every successful-shaped request pays the same bcrypt cost regardless
+      // of which branch it actually takes.
+      const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+      const emailOwner = await findSignupByEmail(signupsDir, normalizedEmail);
+      // A DIFFERENT username already owns this email -- a resend under the
+      // same username with the same email is not a duplicate of itself.
+      const emailTakenByAnotherAccount = emailOwner !== null && emailOwner.username !== username;
+
+      if (!emailTakenByAnotherAccount) {
+        const token = randomBytes(32).toString('hex');
+        const verificationTokenHash = createHash('sha256').update(token).digest('hex');
+        const tokenTtlMs = signupConfig.tokenTtlMs ?? DEFAULT_SIGNUP_TOKEN_TTL_MS;
+        // A resend restarts the unverified-account TTL clock for this
+        // user's own retry -- simpler than tracking two separate
+        // timestamps, and a reasonable behavior for a self-initiated retry.
+        const createdAt = new Date().toISOString();
+        const verificationTokenExpiresAt = new Date(Date.now() + tokenTtlMs).toISOString();
+
+        if (isResend && existingSignup !== null) {
+          // A resend must prove nothing and change nothing except the
+          // token/expiry (barring the pre-existing narrow verify-vs-resend
+          // race noted below) -- it carries the STORED email and
+          // passwordHash forward rather than the request's. Given the
+          // email-match gate above, the request's email is already confirmed
+          // identical to existingSignup.email, but the password must never
+          // come from this request: using the request's freshly-hashed
+          // passwordHash here would let anyone who merely knows a victim's
+          // pending username and email (not secret) silently replace the
+          // victim's password while the re-sent verification link still goes
+          // to the victim's own inbox -- a full account takeover the
+          // victim's own click would complete. bcrypt.hash above still runs
+          // unconditionally for timing uniformity; its result is simply
+          // never used on this branch.
+          //
+          // `existingSignup` is a stale read taken above, before the
+          // bcrypt.hash await -- a verify that lands in that window has its
+          // `verified`/`verifiedAt` write silently rolled back by this
+          // overwrite's stale spread. Pre-existing (present identically
+          // before this fix), narrow, and self-recoverable: the user sees
+          // `200 verified` but the account reverts to unverified, and simply
+          // clicking the newer resent link verifies it for real. Not fixed
+          // here -- would need a re-read-immediately-before-write
+          // restructure, out of scope for this round.
+          await overwriteSignup(signupsDir, {
+            ...existingSignup,
+            schemaVersion: SIGNUP_SCHEMA_VERSION,
+            createdAt,
+            verificationTokenHash,
+            verificationTokenExpiresAt,
+          });
+        } else {
+          const record: SignupRecord = {
+            schemaVersion: SIGNUP_SCHEMA_VERSION,
+            username,
+            email: normalizedEmail,
+            passwordHash,
+            verified: false,
+            createdAt,
+            verifiedAt: null,
+            verificationTokenHash,
+            verificationTokenExpiresAt,
+          };
+          const result = await createSignupExclusive(signupsDir, record);
+          if (result === 'exists') {
+            // Lost a race against a concurrent signup for the same username
+            // that landed between the case-fold lookup above and this write
+            // -- same response as any other duplicate-username case.
+            res.status(409).json({ error: 'username already taken' });
+            return;
+          }
+        }
+
+        const verifyUrl = `${signupConfig.publicAppUrl}/verify?username=${encodeURIComponent(
+          username,
+        )}&token=${encodeURIComponent(token)}`;
+        await signupConfig.sendEmail({
+          to: normalizedEmail,
+          subject: 'Verify your budget-tracker account',
+          html: `<p>Click the link below to verify your budget-tracker account:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`,
+        });
+      }
+
+      // Identical response for every success path (new signup, resend, and
+      // the silent-duplicate-email case above) -- an attacker probing for
+      // registered emails can't distinguish any of them from the response.
+      res.status(200).json({ message: 'check your email to verify your account' });
+    },
+  );
+
+  app.post('/api/verify', async (req: Request, res: Response) => {
+    if (!config.signup) {
+      res.status(503).json({ error: 'self-service signup is not enabled' });
+      return;
+    }
+
+    const username = stringField(req.body, 'username');
+    const token = stringField(req.body, 'token');
+
+    if (username === undefined || token === undefined) {
+      res.status(400).json({ error: 'invalid or expired verification link' });
+      return;
+    }
+
+    const record = await readSignup(signupsDir, username);
+    if (record === null) {
+      res.status(400).json({ error: 'invalid or expired verification link' });
+      return;
+    }
+
+    // Timing-safe comparison, mirroring session.ts's verifySession pattern
+    // exactly -- including the length check before timingSafeEqual, which
+    // throws on mismatched-length buffers rather than returning false. This
+    // runs *before* the `record.verified` idempotency check below: an
+    // already-verified record must reject a non-matching token with the same
+    // generic 400 a nonexistent record gets, rather than the 200 "already
+    // verified" it would get if `verified` were checked first -- otherwise
+    // any garbage token against a verified username is an unauthenticated
+    // verified-username enumeration oracle. Legitimate idempotency (a second
+    // click of the *same* emailed link) still works because verifying no
+    // longer nulls out verificationTokenHash below.
+    const providedTokenHash = createHash('sha256').update(token).digest('hex');
+    const providedBuf = Buffer.from(providedTokenHash, 'hex');
+    const expectedBuf = Buffer.from(record.verificationTokenHash ?? '', 'hex');
+    const tokenMatches =
+      providedBuf.length === expectedBuf.length && timingSafeEqual(providedBuf, expectedBuf);
+
+    if (!tokenMatches) {
+      res.status(400).json({ error: 'invalid or expired verification link' });
+      return;
+    }
+
+    if (record.verified) {
+      // Idempotent: a second click on an old (already-used) link, with the
+      // same original token, is not an error.
+      res.status(200).json({ message: 'already verified', username });
+      return;
+    }
+
+    if (
+      record.verificationTokenExpiresAt === null ||
+      Date.now() > Date.parse(record.verificationTokenExpiresAt)
+    ) {
+      // Same generic message as every other invalid-token case above --
+      // existing-but-expired and never-existing must stay indistinguishable.
+      res.status(400).json({ error: 'invalid or expired verification link' });
+      return;
+    }
+
+    await overwriteSignup(signupsDir, {
+      ...record,
+      verified: true,
+      verifiedAt: new Date().toISOString(),
+    });
+
+    res.status(200).json({ message: 'verified', username });
   });
 
   const authMiddleware = createAuthMiddleware(config.sessionSecret);
