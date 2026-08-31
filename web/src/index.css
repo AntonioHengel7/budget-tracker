@@ -233,6 +233,14 @@ label {
   font: inherit;
 }
 
+/* Without this, the global `button:hover` rule above (higher specificity
+   than a bare `.link-button` at rest -- 0,1,1 vs 0,1,0) still applies on
+   hover, painting a tight background box around the text since this
+   element has no padding to give that box room to breathe. */
+.link-button:hover {
+  background: none;
+}
+
 /* Tables have a wide min-content width (many columns) that doesn't fit
    narrow mobile viewports (issue #77: 34px overflow at 320px, 74px at
    280px). Wrapping the table in this scrollable container confines the
