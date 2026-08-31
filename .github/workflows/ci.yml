@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a deploy of the current main be re-triggered from the Actions tab
+  # without an empty commit -- e.g. after resolving a transient Fly-side
+  # issue that made a push-triggered deploy fail.
+  workflow_dispatch:
 
 jobs:
   ci:
@@ -105,3 +109,24 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+
+  # Runs after both jobs above pass, and only on a push to main (never on a
+  # PR -- a PR is unreviewed/unmerged code) or a manual workflow_dispatch of
+  # main. main is already gated behind pre-merge-gate.sh's SOCRATES/PLATO/
+  # HOBBES + CI requirement before anything can merge, so "merge to main" is
+  # the intended, sole deploy trigger -- this job just makes that automatic
+  # instead of the previous manual `fly deploy` step.
+  deploy:
+    needs: [ci, web]
+    # refs/heads/main only ever matches a push to main or a workflow_dispatch
+    # run against main -- a pull_request event's ref is refs/pull/<n>/merge,
+    # so this alone already excludes PRs without a separate event_name check.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only --app moonbudget
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
