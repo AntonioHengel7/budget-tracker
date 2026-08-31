@@ -151,6 +151,17 @@ describe('signupStore', () => {
   });
 
   describe('overwriteSignup', () => {
+    // Guarantees the mock is off before and after every test in this block,
+    // regardless of whether an assertion above throws first -- a bare
+    // `failNextWrite = false` after the assertion (the prior version of this
+    // file) gets skipped on failure, poisoning every later test in the file
+    // that touches writeFile with a confusing, unrelated ENOSPC error.
+    // Mirrors tests/storage/jsonStore.test.ts's existing beforeEach/afterEach
+    // reset for its own node:fs/promises mock.
+    afterEach(() => {
+      failNextWrite = false;
+    });
+
     it('creates the directory and file when neither exists yet', async () => {
       const record = makeRecord();
       await overwriteSignup(signupsDir, record);
@@ -193,7 +204,8 @@ describe('signupStore', () => {
       await expect(
         overwriteSignup(signupsDir, makeRecord({ email: 'new@example.com' })),
       ).rejects.toThrow();
-      failNextWrite = false;
+      // Reset happens in the block's afterEach above -- guaranteed to run
+      // even if the assertion above (or below) throws first.
 
       await expect(readSignup(signupsDir, 'antonio')).resolves.toMatchObject({
         email: 'old@example.com',
