@@ -10,14 +10,14 @@ export const SIGNUP_SCHEMA_VERSION = 1 as const;
 export interface SignupRecord {
   readonly schemaVersion: typeof SIGNUP_SCHEMA_VERSION;
   readonly username: string;
-  /** Normalized: `email.trim().toLowerCase()`. Comparisons against it must use an already-normalized input. */
+  /** Normalized: `email.toLowerCase()`. Comparisons against it must use an already-normalized input. */
   readonly email: string;
   /** bcrypt, hashed at `BCRYPT_COST` from `credentials.ts` -- the one pinned cost every password hash in this app uses. */
   readonly passwordHash: string;
   readonly verified: boolean;
   /** ISO 8601. */
   readonly createdAt: string;
-  /** ISO 8601, or `null` once `verified` is `true`. */
+  /** `null` until `verified` becomes `true`, then set to the ISO 8601 verification timestamp. */
   readonly verifiedAt: string | null;
   /**
    * SHA-256 hex digest of the raw verification token. Deliberately NOT

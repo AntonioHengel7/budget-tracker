@@ -836,19 +836,32 @@ export function createApp(config: AppConfig): Express {
 
         if (isResend && existingSignup !== null) {
           // A resend must prove nothing and change nothing except the
-          // token/expiry -- it carries the STORED email and passwordHash
-          // forward rather than the request's. Given the email-match gate
-          // above, the request's email is already confirmed identical to
-          // existingSignup.email, but the password must never come from this
-          // request: using the request's freshly-hashed passwordHash here
-          // would let anyone who merely knows a victim's pending username and
-          // email (not secret) silently replace the victim's password while
-          // the re-sent verification link still goes to the victim's own
-          // inbox -- a full account takeover the victim's own click would
-          // complete. bcrypt.hash above still runs unconditionally for timing
-          // uniformity; its result is simply never used on this branch.
+          // token/expiry (barring the pre-existing narrow verify-vs-resend
+          // race noted below) -- it carries the STORED email and
+          // passwordHash forward rather than the request's. Given the
+          // email-match gate above, the request's email is already confirmed
+          // identical to existingSignup.email, but the password must never
+          // come from this request: using the request's freshly-hashed
+          // passwordHash here would let anyone who merely knows a victim's
+          // pending username and email (not secret) silently replace the
+          // victim's password while the re-sent verification link still goes
+          // to the victim's own inbox -- a full account takeover the
+          // victim's own click would complete. bcrypt.hash above still runs
+          // unconditionally for timing uniformity; its result is simply
+          // never used on this branch.
+          //
+          // `existingSignup` is a stale read taken above, before the
+          // bcrypt.hash await -- a verify that lands in that window has its
+          // `verified`/`verifiedAt` write silently rolled back by this
+          // overwrite's stale spread. Pre-existing (present identically
+          // before this fix), narrow, and self-recoverable: the user sees
+          // `200 verified` but the account reverts to unverified, and simply
+          // clicking the newer resent link verifies it for real. Not fixed
+          // here -- would need a re-read-immediately-before-write
+          // restructure, out of scope for this round.
           await overwriteSignup(signupsDir, {
             ...existingSignup,
+            schemaVersion: SIGNUP_SCHEMA_VERSION,
             createdAt,
             verificationTokenHash,
             verificationTokenExpiresAt,

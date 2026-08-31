@@ -3,10 +3,46 @@ import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StorageError } from '../../src/storage/jsonStore.js';
 import { SIGNUP_SCHEMA_VERSION } from '../../src/server/signupSchema.js';
 import type { SignupRecord } from '../../src/server/signupSchema.js';
+
+// Module-scope `vi.mock` calls are hoisted by vitest above all imports
+// regardless of source position -- placed here, immediately after the real
+// imports it wraps, purely for readability. `failNextWrite` gates it off by
+// default so every other test in this file goes through the real
+// `node:fs/promises` untouched; only the discriminator test below flips it.
+let failNextWrite = false;
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    writeFile: async (path: Parameters<typeof real.writeFile>[0], data: Parameters<typeof real.writeFile>[1], opts: Parameters<typeof real.writeFile>[2]) => {
+      if (!failNextWrite) {
+        return real.writeFile(path, data, opts);
+      }
+      // Truncated bytes land on disk (simulating a partial write) before the
+      // write itself reports failure -- proving overwriteSignup's caller-visible
+      // guarantee depends on the temp-file+rename() indirection, not on the
+      // underlying writeFile call never failing partway through.
+      await real.writeFile(path, String(data).slice(0, 40), opts);
+      throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    },
+  };
+});
+
+// Partial mock: only `verifyPassword` is wrapped in a spy (delegating to the
+// real implementation), everything else -- including `DUMMY_HASH` itself --
+// stays real. Used below to assert `checkSignupLogin` actually compares
+// against `DUMMY_HASH` on a nonexistent username, not just that it "still
+// returns 'not-found'" (which a deleted dummy-compare call would too).
+vi.mock('../../src/server/credentials.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/server/credentials.js')>();
+  return { ...real, verifyPassword: vi.fn(real.verifyPassword) };
+});
+
+import { DUMMY_HASH, verifyPassword } from '../../src/server/credentials.js';
 import {
   checkSignupLogin,
   createSignupExclusive,
@@ -16,6 +52,8 @@ import {
   readSignup,
   sweepExpiredSignups,
 } from '../../src/server/signupStore.js';
+
+const verifyPasswordSpy = vi.mocked(verifyPassword);
 
 // Low bcrypt cost -- fast tests, not production (mirrors api.integration.test.ts).
 const TEST_BCRYPT_COST = 4;
@@ -130,13 +168,36 @@ describe('signupStore', () => {
     // onto the final path wouldn't fail this test on a successful write, but
     // this at least locks in that the temp file is always cleaned up rather
     // than left behind -- mirrors createSignupExclusive's own
-    // "never leaves a stray .tmp file" test above.
+    // "never leaves a stray .tmp file" test above. Insufficient on its own to
+    // pin the atomic-write behavior itself -- see the discriminating test
+    // just below.
     it('never leaves a stray .tmp file behind after a successful overwrite', async () => {
       await createSignupExclusive(signupsDir, makeRecord({ email: 'old@example.com' }));
       await overwriteSignup(signupsDir, makeRecord({ email: 'new@example.com' }));
 
       const entries = await readdir(signupsDir);
       expect(entries).toEqual(['antonio.json']);
+    });
+
+    // Actually discriminates atomic-vs-not, unlike the ".tmp" test above: a
+    // direct `writeFile(finalPath, ...)` never creates a temp file to begin
+    // with, so a failure partway through a direct write corrupts the
+    // original record in place. Simulates exactly that failure mode (partial
+    // bytes land, then the write throws) and asserts the ORIGINAL record on
+    // disk survives untouched -- which is only true if the write actually
+    // went to a temp file that was never rename()'d over the original.
+    it('leaves the ORIGINAL record intact when the write dies mid-stream', async () => {
+      await createSignupExclusive(signupsDir, makeRecord({ email: 'old@example.com' }));
+
+      failNextWrite = true;
+      await expect(
+        overwriteSignup(signupsDir, makeRecord({ email: 'new@example.com' })),
+      ).rejects.toThrow();
+      failNextWrite = false;
+
+      await expect(readSignup(signupsDir, 'antonio')).resolves.toMatchObject({
+        email: 'old@example.com',
+      });
     });
   });
 
@@ -245,6 +306,18 @@ describe('signupStore', () => {
   describe('checkSignupLogin', () => {
     it('returns "not-found" for a username with no record', async () => {
       await expect(checkSignupLogin(signupsDir, 'nobody', 'whatever')).resolves.toBe('not-found');
+    });
+
+    // Pins the DUMMY_HASH timing-oracle defense: deleting the
+    // `verifyPassword(password, DUMMY_HASH)` call on the record === null
+    // branch leaves every other test in this file green, since none of them
+    // assert anything about *what* gets compared on a nonexistent username --
+    // only this test does, via the partial mock below.
+    it('runs a real bcrypt compare against DUMMY_HASH for a nonexistent username', async () => {
+      await expect(
+        checkSignupLogin(signupsDir, 'nobody', 'whatever'),
+      ).resolves.toBe('not-found');
+      expect(verifyPasswordSpy).toHaveBeenCalledWith('whatever', DUMMY_HASH);
     });
 
     it('returns "unverified" before ever attempting a password compare', async () => {
