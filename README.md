@@ -24,6 +24,7 @@ Live at [moonbudget](https://moonbudget.fly.dev).
 
 ```bash
 npm run build
+npm link   # puts `budget` on your PATH; skip this and run `node dist/cli/index.js` instead if you'd rather not link
 
 budget add 42.50 groceries --kind expense
 budget add 2000 paycheck --kind income
@@ -35,16 +36,26 @@ budget summary
 
 Defaults to `./budget.json`; override with `-f <path>` or the `BUDGET_FILE` env var.
 
-## Running the web app
+## Running the web app locally
+
+The API server and the frontend run separately in local dev — the server only serves the built frontend as static files when `STATIC_DIR` is set (that's done for you inside Docker/production, not by `npm start` on its own).
 
 ```bash
-npm run build          # builds the server
-cd web && npm run build  # builds the static frontend
-npm start                # serves both from src/server
+# terminal 1: API server
+npm run build
+SESSION_SECRET=<32+ char secret> AUTH_USERS_JSON=<see src/server/credentials.ts> npm start
+
+# terminal 2: frontend with hot reload, proxies /api to the server above
+cd web && npm run dev
 ```
 
-For local frontend development with hot reload: `cd web && npm run dev`.
+To run the real production build (server + frontend served from one process, same as deploy) locally instead, use Docker:
+
+```bash
+docker build -t budget-tracker .
+docker run -p 8080:8080 -e SESSION_SECRET=<32+ char secret> -e AUTH_USERS_JSON=<...> budget-tracker
+```
 
 ## Deployment
 
-Deployed on Fly.io — merging to `main` auto-deploys. Requires `SESSION_SECRET`, `AUTH_USERS_JSON`, and `RESEND_API_KEY` set via `fly secrets set`.
+Deployed on Fly.io — merging to `main` auto-deploys via the Docker image above. Required secrets (`fly secrets set`): `SESSION_SECRET`, `AUTH_USERS_JSON`, and, if self-service signup is enabled, `RESEND_API_KEY` together with `EMAIL_FROM_ADDRESS` and `PUBLIC_APP_URL` (all three are required as soon as `RESEND_API_KEY` is set — the server fails fast at boot otherwise).
