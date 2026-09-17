@@ -39,6 +39,41 @@ describe('web API', () => {
     expect(res.status).toBe(200);
   });
 
+  it('reports /healthz/db as disabled when no database is configured', async () => {
+    const res = await request(app).get('/healthz/db');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, enabled: false });
+  });
+
+  it('reports /healthz/db healthy when the injected check succeeds', async () => {
+    const dbApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      database: { checkHealth: vi.fn().mockResolvedValue(undefined) },
+    });
+    const res = await request(dbApp).get('/healthz/db');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, enabled: true });
+  });
+
+  it('reports /healthz/db unhealthy without leaking the underlying error when the injected check fails', async () => {
+    const dbApp = createApp({
+      dataDir,
+      credentials: [{ username: 'antonio', passwordHash }],
+      sessionSecret: 'test-secret',
+      insecureCookies: true,
+      database: {
+        checkHealth: vi.fn().mockRejectedValue(new Error('ECONNREFUSED 10.0.0.1:3306 user=root@10.0.0.1')),
+      },
+    });
+    const res = await request(dbApp).get('/healthz/db');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ ok: false, enabled: true, error: 'database unreachable' });
+    expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED');
+  });
+
   it('rejects an unauthenticated request to a protected route', async () => {
     const res = await request(app).get('/api/status?period=2026-08');
     expect(res.status).toBe(401);

@@ -117,6 +117,20 @@ export interface AppConfig {
     /** Overrides the default cap on total unverified signup accounts -- mainly so tests don't need to create hundreds to exercise the cap. */
     readonly unverifiedCap?: number;
   };
+  /**
+   * Enables `GET /healthz/db` to actually probe a database connection.
+   * `undefined` (the default) means no database is configured: the endpoint
+   * still responds `200`, just with `enabled: false`, since a deployment
+   * with no database (e.g. today's JSON-only Fly production) isn't broken,
+   * it just doesn't have one. All reads/writes still go through the JSON
+   * store regardless of this field -- it exists purely so infrastructure
+   * that expects a reachable database (Phase 2 onward) has something to
+   * check against.
+   */
+  readonly database?: {
+    /** Injected so tests never need a real MySQL connection -- see `database.ts`'s `createDatabaseHealthCheck`. Resolves if reachable, rejects otherwise. */
+    checkHealth(): Promise<void>;
+  };
 }
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -519,6 +533,30 @@ export function createApp(config: AppConfig): Express {
 
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
+  });
+
+  // Same placement as /healthz above (before the rate limiter, outside the
+  // /api prefix) and for the same reason -- an infra health check must never
+  // be throttled. Unlike /healthz this one is conditional: with no database
+  // configured (config.database undefined), there's nothing to probe, so it
+  // reports 200/enabled:false rather than failing a check that was never
+  // supposed to pass.
+  app.get('/healthz/db', (_req: Request, res: Response) => {
+    if (config.database === undefined) {
+      res.status(200).json({ ok: true, enabled: false });
+      return;
+    }
+    config.database
+      .checkHealth()
+      .then(() => {
+        res.status(200).json({ ok: true, enabled: true });
+      })
+      .catch(() => {
+        // Never echo the underlying driver error (it can include the
+        // connection string/credentials) back to a client -- this endpoint
+        // may be reachable pre-auth, same as /healthz.
+        res.status(503).json({ ok: false, enabled: true, error: 'database unreachable' });
+      });
   });
 
   // Registered before any /api route (and before the body parser below) so
