@@ -20,11 +20,17 @@ variable "admin_cidr" {
 
   # The comment above and this variable having no default only stop an
   # ACCIDENTAL open-to-the-internet security group -- neither stops someone
-  # from explicitly (if unwisely) passing "0.0.0.0/0" itself. This closes
-  # that gap structurally instead of relying on the comment being read.
+  # from explicitly (if unwisely) passing a broad range themselves. An
+  # earlier version of this validation only denylisted the exact string
+  # "0.0.0.0/0" -- HOBBES demonstrated that a differently-spelled but
+  # equally open range (0.0.0.0/1, 0.0.0.0/8, ...) sailed straight through
+  # unchanged. This is an allowlist instead: require an actual /32 (a
+  # single host), which is what "your own IP" always is -- so there is no
+  # spelling of "too broad" left to sneak past it, not just the one exact
+  # string a denylist happened to name.
   validation {
-    condition     = var.admin_cidr != "0.0.0.0/0"
-    error_message = "admin_cidr must not be 0.0.0.0/0 -- use your own IP as a /32."
+    condition     = can(cidrhost(var.admin_cidr, 0)) && endswith(var.admin_cidr, "/32")
+    error_message = "admin_cidr must be a single IP as a /32 CIDR (e.g. 203.0.113.7/32) -- no broader range, including 0.0.0.0/0, is allowed."
   }
 }
 
