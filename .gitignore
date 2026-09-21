@@ -4,6 +4,12 @@ dist/
 coverage/
 *.tsbuildinfo
 .env
+infra/k8s/secret.yaml
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
 budget.json
 data/
 .claude/worktrees/

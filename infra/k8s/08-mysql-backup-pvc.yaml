@@ -1,0 +1,14 @@
+# Separate from mysql's own data volume on purpose -- a backup that lives
+# on the same disk as the thing it's backing up doesn't survive the
+# failure mode that actually matters (that disk being lost/corrupted).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-backups
+  namespace: moonbudget
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi

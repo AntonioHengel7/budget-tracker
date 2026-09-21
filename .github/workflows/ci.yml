@@ -10,7 +10,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Computes which parts of the tree changed so app tests/build/deploy can
+  # be skipped for infra/-only changes (Phase 3 of the devops-learning
+  # track) while manifest validation still runs. `non_infra` matches every
+  # changed file EXCEPT under infra/ -- the '**' + '!infra/**' pair is
+  # dorny/paths-filter's way of expressing "at least one file outside
+  # infra/ changed", not just "infra/ changed" (which `infra` below
+  # already covers on its own).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      non_infra: ${{ steps.filter.outputs.non_infra }}
+      infra: ${{ steps.filter.outputs.infra }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            non_infra:
+              - '**'
+              - '!infra/**'
+            infra:
+              - 'infra/k8s/**'
+              - 'infra/helm/**'
+            terraform:
+              - 'infra/terraform/**'
+
   ci:
+    needs: changes
+    if: needs.changes.outputs.non_infra == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +121,8 @@ jobs:
           exit 1
 
   web:
+    needs: changes
+    if: needs.changes.outputs.non_infra == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +141,76 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+
+  # Validates infra/k8s's raw manifests and the Helm chart's rendered
+  # output against the real Kubernetes API schemas -- catches typos'd
+  # field names, wrong types, etc. without needing a live cluster.
+  # Runs independently of ci/web so it still executes for infra-only PRs.
+  validate-manifests:
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Validate raw manifests
+        run: kubeconform -strict -summary $(find infra/k8s -name '*.yaml')
+      - uses: azure/setup-helm@v4
+      - run: helm lint infra/helm/budget-tracker
+      - name: Validate rendered Helm output
+        run: helm template budget-tracker infra/helm/budget-tracker | kubeconform -strict -summary -
+
+  # Builds and pushes the same image the smoke test just proved boots and
+  # answers /healthz, tagged by commit SHA (and `latest` on main) -- lets
+  # infra/k8s and infra/helm reference a real, pulled image instead of only
+  # the kind-load-only :local tag from local development.
+  ghcr:
+    needs: [ci, web]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+      - run: docker build -t "$IMAGE:latest" -t "$IMAGE:${{ github.sha }}" .
+      - run: docker push "$IMAGE:latest" && docker push "$IMAGE:${{ github.sha }}"
+
+  # `terraform plan` needs real AWS credentials to read current state, so
+  # this only runs anything meaningful once AWS_ACCESS_KEY_ID/
+  # AWS_SECRET_ACCESS_KEY repo secrets are configured (Phase 4). Gated to
+  # pull_request only -- plan is a read-only dry run, safe to show on every
+  # PR that touches Terraform; it never applies anything.
+  terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform/environments/staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive ../../
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - name: terraform plan
+        run: terraform init && terraform plan -no-color
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
 
   # Runs after both jobs above pass, and only on a push to main (never on a
   # PR -- a PR is unreviewed/unmerged code) or a manual workflow_dispatch of

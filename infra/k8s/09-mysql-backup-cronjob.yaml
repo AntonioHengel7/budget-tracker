@@ -1,0 +1,46 @@
+# Daily at 02:00. `mysqldump --all-databases` (not just budgettracker) so a
+# restore recreates users/grants too, not just table data. Uses the mysql:8
+# image purely for its bundled mysqldump/mysql client binaries -- it never
+# runs mysqld itself.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mysql-backup
+  namespace: moonbudget
+spec:
+  schedule: '0 2 * * *'
+  # A backup that's still running when the next one starts would corrupt
+  # both -- Forbid means "skip this run entirely rather than overlap",
+  # which is the safe failure mode for a backup job specifically.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: mysqldump
+              image: mysql:8
+              env:
+                - name: MYSQL_ROOT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: budget-secrets
+                      key: MYSQL_ROOT_PASSWORD
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  FILE="/backups/backup-$(date +%Y%m%d%H%M%S).sql"
+                  mysqldump -h mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --all-databases > "$FILE"
+                  echo "Backup written: $FILE ($(wc -c < "$FILE") bytes)"
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: mysql-backups

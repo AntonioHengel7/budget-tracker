@@ -1,0 +1,57 @@
+# The one file you'd actually change per environment -- every {{ .Values.x }}
+# in templates/ is filled in from here (or from --set / -f overrides on
+# `helm install`/`helm upgrade`). Kept as dev-only throwaway values, same as
+# infra/k8s/examples/secret.example.yaml -- never real credentials, but see
+# the note below on why a *real* deployment must not do it this way.
+image:
+  repository: budget-tracker
+  tag: local
+  # IfNotPresent, not the Kubernetes default (Always for a mutable tag) --
+  # this image only exists because `kind load docker-image` copied it into
+  # the cluster's containerd; there's no registry to pull it from.
+  pullPolicy: IfNotPresent
+
+app:
+  # MUST stay 1 as long as the app stores data as JSON files on a
+  # ReadWriteOnce PVC (see templates/pvc.yaml) -- two Pods writing the same
+  # files with no locking is a direct path to corrupted data. Templated
+  # here (rather than hardcoded like the Phase 2 plain manifest) so the
+  # constraint is visible and documented, not so it's meant to be casually
+  # changed.
+  replicas: 1
+
+mysql:
+  # MUST stay 1 -- real multi-instance MySQL replication is a separate,
+  # bigger topic, out of scope here.
+  replicas: 1
+
+config:
+  port: '8080'
+  dataDir: /data
+  trustProxy: '0'
+  mysqlDatabase: budgettracker
+  # Dev-cluster-only: this chart is only ever reached via
+  # `kubectl port-forward` (plain HTTP, no TLS) in this phase. A real
+  # deployment behind HTTPS must never set this.
+  insecureCookies: 'true'
+
+storage:
+  appSize: 200Mi
+  mysqlSize: 500Mi
+
+# Throwaway dev-only values, same shape as infra/k8s/examples/secret.example.yaml.
+# A REAL deployment would never commit real credentials into values.yaml --
+# it would override these at install time instead, e.g.
+#   helm install budget-tracker ./infra/helm/budget-tracker \
+#     --namespace moonbudget --create-namespace \
+#     --set secrets.mysqlPassword=<real value> \
+#     -f a-gitignored-values.secret.yaml
+# committed here only because every value below is already public,
+# documented-fake data (the exact same strings already in
+# infra/k8s/examples/secret.example.yaml).
+secrets:
+  sessionSecret: kind-dev-only-session-secret-not-a-real-secret
+  authUsersJson: '[{"username":"devuser","passwordHash":"$2a$10$YYcfaFJ18Lfjv.O4KF2YQucz3Gm2v8e5K/zqawcOc9ZVVGz82Cn96"}]'
+  mysqlRootPassword: dev-root-password
+  mysqlUser: budgetuser
+  mysqlPassword: dev-password

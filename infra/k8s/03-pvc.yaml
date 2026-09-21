@@ -1,0 +1,20 @@
+# The app's /data directory (JSON files) needs to survive the app Pod being
+# deleted and recreated -- a PVC is a request for exactly that: durable
+# storage independent of any one Pod's lifetime. No storageClassName is set,
+# so this uses kind's built-in default StorageClass, which provisions the
+# actual disk space automatically (nothing to set up by hand).
+#
+# ReadWriteOnce means only one node in the cluster can mount this volume at
+# a time -- fine here since the app Deployment below is pinned to 1 replica
+# anyway (see 06-app-deployment.yaml for why).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: budget-data
+  namespace: moonbudget
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Mi

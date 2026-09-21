@@ -1,0 +1,31 @@
+# The actual "alert on the health endpoints" requirement. `for:` durations
+# are short (1m/2m) so this is demonstrable/testable quickly on a kind
+# cluster -- a real deployment would likely widen these to avoid paging
+# on a single transient blip.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: budget-tracker-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: budget-tracker.health
+      rules:
+        - alert: AppDown
+          expr: probe_success{instance="http://app.moonbudget.svc.cluster.local:8080/healthz"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: budget-tracker app is not responding to /healthz
+            description: The blackbox probe against /healthz has failed for 1 minute straight. See docs/runbooks/app-down.md.
+        - alert: DatabaseUnreachable
+          expr: probe_success{instance="http://app.moonbudget.svc.cluster.local:8080/healthz/db"} == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: budget-tracker cannot reach its MySQL database
+            description: The blackbox probe against /healthz/db has failed for 2 minutes straight. See docs/runbooks/database-restore.md if this traces back to data loss, otherwise check the mysql-0 pod directly.

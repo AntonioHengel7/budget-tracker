@@ -1,0 +1,6 @@
+apiVersion: v2
+name: budget-tracker
+description: moonbudget app + MySQL, packaged from the Phase 2 plain manifests (docs/devops-learning/phase-2-kubernetes.md)
+type: application
+version: 0.1.0
+appVersion: '0.1.0'
