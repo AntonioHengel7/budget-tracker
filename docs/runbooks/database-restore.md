@@ -51,12 +51,19 @@ kubectl run backup-debug --restart=Never -n moonbudget --image=mysql:8 \
   "volumes":[{"name":"backups","persistentVolumeClaim":{"claimName":"mysql-backups"}}]}}'
 
 kubectl exec -n moonbudget backup-debug -- sh -c 'cat /backups/<chosen-backup-file>.sql' \
-  | kubectl exec -i -n moonbudget mysql-0 -- sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"'
+  | kubectl exec -i -n moonbudget mysql-0 -- sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot'
+
+# The dump includes the system `mysql` schema's users/grants (it's an
+# --all-databases dump). MySQL caches grant tables in memory -- restoring
+# them via a raw SQL import doesn't automatically reload that cache, so
+# without this the restored grants may not actually take effect until the
+# next restart.
+kubectl exec -n moonbudget mysql-0 -- sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "FLUSH PRIVILEGES;"'
 
 kubectl delete pod backup-debug -n moonbudget
 ```
 
-This restores every database in the dump (including the system `mysql` schema's users/grants) into the running `mysql-0` instance. It does not require deleting or recreating the MySQL Pod/PVC.
+This restores every database in the dump (including the system `mysql` schema's users/grants) into the running `mysql-0` instance. It does not require deleting or recreating the MySQL Pod/PVC. (The backup itself is taken with `mysqldump --single-transaction`, so it reflects one consistent point in time even if writes were happening during the dump -- see `infra/k8s/09-mysql-backup-cronjob.yaml`.)
 
 ## 4. Verify
 

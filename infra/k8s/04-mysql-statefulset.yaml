@@ -59,15 +59,18 @@ spec:
           # exit code -- the same mechanism (and the same tool, mysqladmin
           # ping) as infra/docker-compose.yml's healthcheck in Phase 1. `sh
           # -c` is needed so `$MYSQL_ROOT_PASSWORD` actually expands; a bare
-          # command array has no shell to interpret `$VAR` with.
+          # command array has no shell to interpret `$VAR` with. Exported as
+          # MYSQL_PWD rather than passed via `-p` so the password never
+          # appears in this process's command line (readable via
+          # /proc/<pid>/cmdline by anything else in the Pod's PID namespace).
           readinessProbe:
             exec:
-              command: ['sh', '-c', 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"']
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
             initialDelaySeconds: 15
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ['sh', '-c', 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"']
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
             initialDelaySeconds: 30
             periodSeconds: 10
   volumeClaimTemplates:

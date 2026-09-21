@@ -9,6 +9,8 @@ infra/k8s/secret.yaml
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
+*.secret.yaml
 crash.log
 budget.json
 data/

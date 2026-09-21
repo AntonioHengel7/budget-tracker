@@ -38,6 +38,12 @@ config:
 storage:
   appSize: 200Mi
   mysqlSize: 500Mi
+  backupSize: 500Mi
+
+backup:
+  # Same cadence/rationale as infra/k8s/09-mysql-backup-cronjob.yaml, which
+  # this template mirrors -- see docs/runbooks/database-restore.md.
+  schedule: '0 2 * * *'
 
 # Throwaway dev-only values, same shape as infra/k8s/examples/secret.example.yaml.
 # A REAL deployment would never commit real credentials into values.yaml --
@@ -45,10 +51,12 @@ storage:
 #   helm install budget-tracker ./infra/helm/budget-tracker \
 #     --namespace moonbudget --create-namespace \
 #     --set secrets.mysqlPassword=<real value> \
-#     -f a-gitignored-values.secret.yaml
-# committed here only because every value below is already public,
-# documented-fake data (the exact same strings already in
-# infra/k8s/examples/secret.example.yaml).
+#     -f values.secret.yaml
+# ("values.secret.yaml" matches the *.secret.yaml pattern in the repo's
+# .gitignore -- an earlier version of this comment referenced a filename
+# that wasn't actually covered by any gitignore rule.) Committed here only
+# because every value below is already public, documented-fake data (the
+# exact same strings already in infra/k8s/examples/secret.example.yaml).
 secrets:
   sessionSecret: kind-dev-only-session-secret-not-a-real-secret
   authUsersJson: '[{"username":"devuser","passwordHash":"$2a$10$YYcfaFJ18Lfjv.O4KF2YQucz3Gm2v8e5K/zqawcOc9ZVVGz82Cn96"}]'

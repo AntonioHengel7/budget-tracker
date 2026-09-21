@@ -42,14 +42,16 @@ spec:
           volumeMounts:
             - name: mysql-data
               mountPath: /var/lib/mysql
+          # MYSQL_PWD rather than `-p` so the password never appears in this
+          # process's command line -- see infra/k8s/04-mysql-statefulset.yaml.
           readinessProbe:
             exec:
-              command: ['sh', '-c', 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"']
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
             initialDelaySeconds: 15
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ['sh', '-c', 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"']
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
             initialDelaySeconds: 30
             periodSeconds: 10
   volumeClaimTemplates:

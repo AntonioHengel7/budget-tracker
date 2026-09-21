@@ -17,6 +17,15 @@ variable "instance_type" {
 variable "admin_cidr" {
   description = "CIDR block allowed to reach SSH (22) and the k3s API (6443) -- your own IP, as a /32, not 0.0.0.0/0."
   type        = string
+
+  # The comment above and this variable having no default only stop an
+  # ACCIDENTAL open-to-the-internet security group -- neither stops someone
+  # from explicitly (if unwisely) passing "0.0.0.0/0" itself. This closes
+  # that gap structurally instead of relying on the comment being read.
+  validation {
+    condition     = var.admin_cidr != "0.0.0.0/0"
+    error_message = "admin_cidr must not be 0.0.0.0/0 -- use your own IP as a /32."
+  }
 }
 
 variable "ssh_public_key" {

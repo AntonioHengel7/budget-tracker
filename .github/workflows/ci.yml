@@ -13,10 +13,19 @@ jobs:
   # Computes which parts of the tree changed so app tests/build/deploy can
   # be skipped for infra/-only changes (Phase 3 of the devops-learning
   # track) while manifest validation still runs. `non_infra` matches every
-  # changed file EXCEPT under infra/ -- the '**' + '!infra/**' pair is
-  # dorny/paths-filter's way of expressing "at least one file outside
-  # infra/ changed", not just "infra/ changed" (which `infra` below
-  # already covers on its own).
+  # changed file EXCEPT under infra/.
+  #
+  # A prior version of this filter used `['**', '!infra/**']`, believing
+  # dorny/paths-filter combined the list gitignore-style (later patterns
+  # override earlier ones). It does not: paths-filter compiles the whole
+  # list into one picomatch matcher that ORs the patterns, and '**' alone
+  # already matches every file, permanently short-circuiting the negation
+  # to always-true regardless of the second pattern -- verified directly:
+  # `picomatch(['**','!infra/**'])('infra/x.yaml')` returns `true`. A lone
+  # negated pattern, with nothing else in the list to OR against, is what
+  # actually works: `picomatch(['!infra/**'])('infra/x.yaml')` returns
+  # `false`, `picomatch(['!infra/**'])('src/x.ts')` returns `true` -- so
+  # dropping the redundant '**' entry is the fix, not adding one.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -30,7 +39,6 @@ jobs:
         with:
           filters: |
             non_infra:
-              - '**'
               - '!infra/**'
             infra:
               - 'infra/k8s/**'
@@ -192,6 +200,14 @@ jobs:
   # AWS_SECRET_ACCESS_KEY repo secrets are configured (Phase 4). Gated to
   # pull_request only -- plan is a read-only dry run, safe to show on every
   # PR that touches Terraform; it never applies anything.
+  #
+  # admin_cidr/ssh_public_key are required variables with no default (on
+  # purpose -- see variables.tf) and CI has no real terraform.tfvars (it's
+  # gitignored), so without TF_VAR_* below `plan` would fail on "no value
+  # for required variable" even once AWS credentials exist. These are
+  # placeholder-only values (an RFC 5737 TEST-NET-3 address, a fake key) so
+  # `plan` can run structurally -- a real apply always uses the operator's
+  # actual values via a local terraform.tfvars, never these.
   terraform:
     needs: changes
     if: needs.changes.outputs.terraform == 'true' && github.event_name == 'pull_request'
@@ -199,6 +215,9 @@ jobs:
     defaults:
       run:
         working-directory: infra/terraform/environments/staging
+    env:
+      TF_VAR_admin_cidr: '203.0.113.7/32'
+      TF_VAR_ssh_public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICIplaceholderplaceholderplaceholderplaceholder ci-placeholder-not-a-real-key'
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
