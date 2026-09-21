@@ -1,0 +1,8 @@
+# A Namespace groups every other object below under one name ("moonbudget")
+# instead of dumping them into the cluster's shared "default" namespace --
+# lets you `kubectl get pods -n moonbudget` and delete the whole thing at
+# once without touching anything else running in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moonbudget

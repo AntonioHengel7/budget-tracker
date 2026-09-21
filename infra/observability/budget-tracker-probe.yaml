@@ -1,0 +1,29 @@
+# A `Probe` (not the more common ServiceMonitor) is the Prometheus
+# Operator's purpose-built object for exactly this: "hit these URLs from
+# outside and record whether they answered", via the blackbox-exporter
+# doing the actual HTTP request and reporting success/failure as the
+# probe_success metric. This reuses the same two endpoints every prior
+# phase already built: /healthz and /healthz/db.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: budget-tracker-health
+  namespace: monitoring
+  labels:
+    # Must match kube-prometheus-stack's release name -- see
+    # values-kube-prometheus-stack.yaml's probeSelectorNilUsesHelmValues
+    # comment for why.
+    release: kube-prometheus-stack
+spec:
+  jobName: budget-tracker-health
+  interval: 15s
+  module: http_2xx
+  prober:
+    url: prometheus-blackbox-exporter.monitoring.svc:9115
+  targets:
+    staticConfig:
+      static:
+        - http://app.moonbudget.svc.cluster.local:8080/healthz
+        - http://app.moonbudget.svc.cluster.local:8080/healthz/db
+      labels:
+        group: budget-tracker

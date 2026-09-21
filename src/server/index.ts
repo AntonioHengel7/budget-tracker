@@ -5,6 +5,7 @@ import type { AppConfig } from './app.js';
 import { CredentialsConfigError, loadCredentials } from './credentials.js';
 import type { Credential } from './credentials.js';
 import { createResendSender } from './email.js';
+import { createDatabaseHealthCheck } from './database.js';
 
 const DEFAULT_PORT = 8080;
 const DEFAULT_DATA_DIR = 'data';
@@ -130,6 +131,14 @@ export function boot(): Booted {
     };
   }
 
+  // Opt-in, same shape as signup above: an unset/empty DATABASE_URL leaves
+  // `database` undefined, so /healthz/db just reports itself disabled (see
+  // AppConfig.database's doc comment in app.ts) and no MySQL pool is ever
+  // opened. Today's production deploy has no DATABASE_URL set and is
+  // unaffected.
+  const databaseUrl = readEnv('DATABASE_URL');
+  const database = databaseUrl !== undefined && databaseUrl !== '' ? createDatabaseHealthCheck(databaseUrl) : undefined;
+
   const app = createApp({
     dataDir,
     credentials,
@@ -138,6 +147,7 @@ export function boot(): Booted {
     insecureCookies,
     ...(staticDir !== undefined ? { staticDir } : {}),
     ...(signup !== undefined ? { signup } : {}),
+    ...(database !== undefined ? { database } : {}),
   });
 
   return { app, port };

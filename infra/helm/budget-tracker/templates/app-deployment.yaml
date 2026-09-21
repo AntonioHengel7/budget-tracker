@@ -1,0 +1,63 @@
+# replicas is templated (see values.yaml's app.replicas comment) but MUST
+# stay 1 as long as the app stores data as JSON files on the budget-data
+# PVC -- see that file's comment for why.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: {{ .Values.app.replicas }}
+  selector:
+    matchLabels:
+      app: budget-tracker
+  template:
+    metadata:
+      labels:
+        app: budget-tracker
+    spec:
+      containers:
+        - name: app
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}'
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: budget-config
+          env:
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: SESSION_SECRET
+            - name: AUTH_USERS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: AUTH_USERS_JSON
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: budget-data
+              mountPath: /data
+          # Deliberately /healthz, not /healthz/db -- see
+          # docs/devops-learning/phase-2-kubernetes.md for why.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: budget-data
+          persistentVolumeClaim:
+            claimName: budget-data

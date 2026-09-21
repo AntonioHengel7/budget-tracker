@@ -1,0 +1,20 @@
+# `clusterIP: None` makes this a "headless" Service -- instead of handing
+# out one load-balanced cluster IP, DNS lookups for "mysql" resolve
+# directly to the Pod(s) backing it. This is the conventional pairing for a
+# StatefulSet (04-mysql-statefulset.yaml's `serviceName: mysql` points
+# here): each replica gets its own stable DNS identity rather than being
+# hidden behind one shared IP. With only one replica the practical
+# difference is small, but it's the correct/expected shape for a
+# StatefulSet and what a real multi-replica setup would depend on.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: moonbudget
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306

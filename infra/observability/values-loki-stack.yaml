@@ -1,0 +1,12 @@
+# Grafana is disabled here -- kube-prometheus-stack already installs one in
+# this namespace; running two would just be two UIs fighting over the same
+# job. Promtail ships every container's stdout/stderr on this node to Loki;
+# no persistence on Loki itself for the same reason as Grafana's above --
+# disposable kind cluster, logs don't need to survive a restart.
+grafana:
+  enabled: false
+promtail:
+  enabled: true
+loki:
+  persistence:
+    enabled: false

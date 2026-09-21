@@ -1,0 +1,84 @@
+# Unlike the app's Deployment+PVC pair, MySQL's storage is declared via
+# `volumeClaimTemplates` below, not a separate PersistentVolumeClaim object.
+# This is the core difference between a StatefulSet and a Deployment: each
+# replica (just one here, "mysql-0") gets its OWN PVC auto-created from this
+# template, with a stable name tied to that specific replica -- so if this
+# were ever scaled up, replica N would always reattach to its own volume,
+# never someone else's. `serviceName` below must match the headless Service
+# in 05-mysql-service.yaml -- that's what gives each replica a stable DNS
+# name (mysql-0.mysql.moonbudget.svc.cluster.local), though we don't rely
+# on that per-replica addressing ourselves since we only ever run one.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: moonbudget
+spec:
+  serviceName: mysql
+  # Real multi-instance MySQL replication (so this could safely be >1) is a
+  # separate, much bigger topic -- out of scope for this phase.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: MYSQL_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: budget-config
+                  key: MYSQL_DATABASE
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          # `exec` probes run a command inside the container and check its
+          # exit code -- the same mechanism (and the same tool, mysqladmin
+          # ping) as infra/docker-compose.yml's healthcheck in Phase 1. `sh
+          # -c` is needed so `$MYSQL_ROOT_PASSWORD` actually expands; a bare
+          # command array has no shell to interpret `$VAR` with. Exported as
+          # MYSQL_PWD rather than passed via `-p` so the password never
+          # appears in this process's command line (readable via
+          # /proc/<pid>/cmdline by anything else in the Pod's PID namespace).
+          readinessProbe:
+            exec:
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ['sh', '-c', 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 500Mi

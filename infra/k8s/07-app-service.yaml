@@ -1,0 +1,18 @@
+# A normal (non-headless) Service: one stable ClusterIP that load-balances
+# across every Pod matching the selector below -- currently just the app
+# Deployment's single Pod, but this is the same object that would spread
+# traffic across multiple replicas for a stateless workload that could
+# actually run more than one copy (unlike this app, for now -- see
+# 06-app-deployment.yaml). Reached from outside the cluster in this phase
+# via `kubectl port-forward -n moonbudget svc/app 8080:8080`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: moonbudget
+spec:
+  selector:
+    app: budget-tracker
+  ports:
+    - port: 8080
+      targetPort: 8080

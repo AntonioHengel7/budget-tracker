@@ -1,0 +1,63 @@
+# Local dev stack: the app image plus a real MySQL container, so
+# /healthz/db has something to actually check. Data reads/writes still go
+# through JSON on the `budget_data` volume -- MySQL here only proves
+# connectivity (Phase 1 of docs/devops-learning). Run from this directory:
+#   docker compose up --build
+# Requires infra/.env (copy infra/.env.example -- dev-only values, never
+# commit the real .env; the repo's root .gitignore already excludes it).
+services:
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      # Exposed to the host only so you can poke at it directly with a MySQL
+      # client while learning -- the app reaches it via the compose network
+      # (service name `mysql`), not through this published port.
+      - '3306:3306'
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'root', '-p${MYSQL_ROOT_PASSWORD}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        # Waits for MySQL's own healthcheck above, not just "container
+        # started" -- MySQL accepts TCP connections before it's actually
+        # ready to authenticate, so a plain `depends_on: [mysql]` would let
+        # the app start racing a database that isn't up yet.
+        condition: service_healthy
+    environment:
+      # Throwaway dev-only credentials, same shape as ci.yml's CI smoke
+      # test -- not used anywhere real.
+      SESSION_SECRET: 'compose-dev-only-session-secret-not-a-real-secret'
+      AUTH_USERS_JSON: '[{"username":"devuser","passwordHash":"$$2a$$10$$YYcfaFJ18Lfjv.O4KF2YQucz3Gm2v8e5K/zqawcOc9ZVVGz82Cn96"}]'
+      DATA_DIR: /data
+      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}
+    volumes:
+      - budget_data:/data
+    ports:
+      - '8080:8080'
+    healthcheck:
+      # node:22-alpine has no curl/wget by design (smaller image) -- Node 22
+      # ships a global `fetch`, so this needs no extra tooling in the image.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  budget_data:
+  mysql_data:

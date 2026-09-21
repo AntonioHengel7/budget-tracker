@@ -1,0 +1,21 @@
+# Non-sensitive settings only -- anything here is readable by anyone who can
+# `kubectl describe` this namespace. Passwords/secrets live in
+# secret.yaml (see examples/secret.example.yaml) instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: budget-config
+  namespace: moonbudget
+data:
+  PORT: '8080'
+  DATA_DIR: /data
+  TRUST_PROXY: '0'
+  # Shared with the mysql StatefulSet's own env below, so both sides agree
+  # on the database name without hardcoding it twice.
+  MYSQL_DATABASE: budgettracker
+  # This kind cluster is only ever reached over plain HTTP via
+  # `kubectl port-forward` -- no TLS anywhere in this phase. A Secure-flagged
+  # cookie is never sent back over plain HTTP, which would silently break
+  # login. Dev-cluster-only setting -- a real deployment behind HTTPS (like
+  # the Fly.io prod deploy) must never set this.
+  INSECURE_COOKIES: 'true'

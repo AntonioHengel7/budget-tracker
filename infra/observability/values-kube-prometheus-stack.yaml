@@ -1,0 +1,48 @@
+# Trims retention/resources for a laptop kind cluster -- a real staging/prod
+# install would drop most of this and size for actual load.
+prometheus:
+  prometheusSpec:
+    retention: 6h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    # Explicit even though it's the chart default: only Probe/ServiceMonitor/
+    # PrometheusRule objects labeled release: kube-prometheus-stack (this
+    # Helm release's name) are picked up -- keeps this Prometheus from
+    # accidentally scraping/alerting on unrelated objects some other chart
+    # might create in the cluster.
+    probeSelectorNilUsesHelmValues: true
+    ruleSelectorNilUsesHelmValues: true
+    serviceMonitorSelectorNilUsesHelmValues: true
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+
+grafana:
+  # No persistence -- this is a disposable kind cluster; dashboards/config
+  # are all provisioned from files below, not clicked together by hand, so
+  # losing Grafana's own storage on pod restart loses nothing that matters.
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  # Enabled by chart default, called out here because the Loki datasource
+  # ConfigMap (loki-datasource-configmap.yaml) depends on it: Grafana's
+  # sidecar container watches for ConfigMaps labeled grafana_datasource: "1"
+  # in this namespace and auto-loads them, no manual "Add data source"
+  # click-through needed.
+  sidecar:
+    datasources:
+      enabled: true
+
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true

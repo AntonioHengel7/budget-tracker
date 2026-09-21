@@ -1,0 +1,79 @@
+# replicas MUST stay 1 as long as the app stores data as JSON files on the
+# budget-data PVC (03-pvc.yaml). Two app Pods would both mount the same
+# ReadWriteOnce volume and could both read/write the same JSON files at the
+# same time with no locking between them -- a direct path to corrupted or
+# lost data. A real database (row locking, transactions) is built to make
+# concurrent writers safe; plain files are not. This is the same
+# constraint Phase 1's Compose file already had (always exactly one `app`
+# container) -- just now explicit as a Kubernetes Deployment setting.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: moonbudget
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: budget-tracker
+  template:
+    metadata:
+      labels:
+        app: budget-tracker
+    spec:
+      containers:
+        - name: app
+          image: budget-tracker:local
+          # kind's nodes run their own containerd, separate from this
+          # laptop's Docker image store -- `budget-tracker:local` only
+          # exists here because `kind load docker-image` copied it in (see
+          # the phase notes). IfNotPresent stops Kubernetes from ever trying
+          # (and failing) to pull that name from a real registry, which is
+          # the default behaviour for any image not tagged `:latest`.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: budget-config
+          env:
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: SESSION_SECRET
+            - name: AUTH_USERS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: AUTH_USERS_JSON
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: budget-secrets
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: budget-data
+              mountPath: /data
+          # Deliberately checks plain /healthz, NOT /healthz/db, for both
+          # probes. The app's core JSON read/write behaviour doesn't depend
+          # on MySQL at all in this phase -- gating the app's own
+          # readiness on a downstream dependency it doesn't actually need
+          # would take the whole app out of rotation over an unrelated
+          # MySQL blip. /healthz/db stays purely informational.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: budget-data
+          persistentVolumeClaim:
+            claimName: budget-data
