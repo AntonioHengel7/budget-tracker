@@ -1,5 +1,10 @@
 # TODO
 
+## Now (2026-08-27)
+
+- [x] **Issue #100** (delete button + "not in effect" status for limits) — DONE 2026-08-27, merged as PR #101 (`dea6593`), deployed (`fly` v13). Fix round addressed all 3 SOCRATES blocking findings + 2 NOTEs; delta re-review PASS, fresh PLATO PASS and HOBBES PASS posted on PR #101 (the branch's only prior "PLATO/HOBBES already PASS" claim had no retrievable SHA-bound comment anywhere, so both were re-run for real rather than trusted). CI green. Live-verified in production (moonbudget.fly.dev): "not in effect" pills render correctly for real categories (checker/food/krab), and a throwaway test limit was created, cancel-confirmed (left intact), then delete-confirmed (removed, single DELETE call, no double-fire) — real user data untouched.
+- [ ] Issues #98 and #99 (budget-tracker's stale copies of Jome harness hooks/docs) — untouched, next up, easiest first (#99 doc-only, then #98 hook file sync).
+
 ## Phase A — Scaffolding (enforcement OFF) — DONE 2026-08-12
 
 - [x] Install Node, scaffold repo, copy harness config
